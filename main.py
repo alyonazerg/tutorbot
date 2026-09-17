@@ -1179,56 +1179,115 @@ def ai_note(kind, error=""):
         AI_LAST["ok"] = AI_LAST.get("ok", 0) + 1
 
 
-def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
-    """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
-    ok, why = ai_allowed()
-    if not ok:
-        ai_note(kind, why)
-        return None
-    if AI_FORMAT == "anthropic":
-        payload = {"model": AI_MODEL, "max_tokens": max_tokens,
-                   "messages": [{"role": "user", "content": prompt}]}
+def ai_conf():
+    """Формат, адрес и модель: подобранные автоматически или из переменных окружения."""
+    return (meta_get("ai_format") or AI_FORMAT,
+            meta_get("ai_url") or AI_URL,
+            meta_get("ai_model") or AI_MODEL)
+
+
+def ai_base():
+    """Корень адреса сервиса без стандартных окончаний."""
+    url = (meta_get("ai_url") or AI_URL).strip().rstrip("/")
+    for tail in ("/v1/chat/completions", "/chat/completions", "/v1/messages",
+                 "/messages", "/v1"):
+        if url.endswith(tail):
+            url = url[:-len(tail)]
+            break
+    return url.rstrip("/")
+
+
+def ai_call(prompt, max_tokens, fmt, url, model, timeout=90):
+    """Один запрос. Возвращает (текст, usage, ошибка)."""
+    payload = {"model": model, "max_tokens": max_tokens,
+               "messages": [{"role": "user", "content": prompt}]}
+    if fmt == "anthropic":
         headers = {"x-api-key": AI_KEY, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
-        if "api.anthropic.com" not in AI_URL:
+        if "api.anthropic.com" not in url:
             headers["Authorization"] = "Bearer " + AI_KEY
     else:
-        payload = {"model": AI_MODEL, "max_tokens": max_tokens,
-                   "messages": [{"role": "user", "content": prompt}]}
         headers = {"Authorization": "Bearer " + AI_KEY,
                    "Content-Type": "application/json", "x-api-key": AI_KEY}
-    req = urllib.request.Request(AI_URL, data=json.dumps(payload).encode("utf-8"),
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                  method="POST")
     for k, v in headers.items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=90) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
-        u = data.get("usage") or {}
-        ai_log(kind, sid,
-               u.get("input_tokens", u.get("prompt_tokens", 0)),
-               u.get("output_tokens", u.get("completion_tokens", 0)))
-        if AI_FORMAT == "anthropic":
-            out = "".join(b.get("text", "") for b in data.get("content", [])).strip()
-        else:
-            out = data["choices"][0]["message"]["content"].strip()
-        if not out:
-            ai_note(kind, "модель вернула пустой ответ (stop_reason: {})".format(
-                data.get("stop_reason", "?")))
-            return None
-        ai_note(kind)
-        return out
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:300]
         try:
             body = (json.loads(body).get("error") or {}).get("message", body)
         except Exception:
             pass
-        ai_note(kind, "HTTP {}: {}".format(e.code, body))
-        print("AI HTTP", e.code, body)
+        return None, {}, "HTTP {}: {}".format(e.code, body)
     except Exception as e:
-        ai_note(kind, "{}: {}".format(type(e).__name__, e))
-        print("AI error:", type(e).__name__, e)
+        return None, {}, "{}: {}".format(type(e).__name__, e)
+    u = data.get("usage") or {}
+    try:
+        if fmt == "anthropic":
+            out = "".join(b.get("text", "") for b in data.get("content", [])).strip()
+        else:
+            out = data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        return None, u, "непонятный ответ сервиса: " + json.dumps(data)[:200]
+    if not out:
+        return None, u, "пустой ответ (stop_reason: {})".format(data.get("stop_reason", "?"))
+    return out, u, ""
+
+
+def ai_probe():
+    """Перебирает сочетания формата и адреса, запоминает рабочее. Возвращает текст отчёта."""
+    if not AI_KEY:
+        return "AI_KEY не задан."
+    base = ai_base()
+    model = meta_get("ai_model") or AI_MODEL
+    tries = [("openai", base + "/v1/chat/completions"),
+             ("anthropic", base + "/v1/messages"),
+             ("openai", base + "/chat/completions"),
+             ("anthropic", base + "/messages")]
+    seen, report = set(), []
+    for fmt, url in tries:
+        if url in seen:
+            continue
+        seen.add(url)
+        out, u, err = ai_call("Ответь одним словом: готово", 20, fmt, url, model, timeout=40)
+        if out:
+            meta_set("ai_format", fmt)
+            meta_set("ai_url", url)
+            ai_log("test", None, u.get("input_tokens", u.get("prompt_tokens", 0)),
+                   u.get("output_tokens", u.get("completion_tokens", 0)))
+            ai_note("test")
+            return ("✅ <b>Заработало.</b>\n\nАдрес: <code>{}</code>\nФормат: <code>{}</code>\n"
+                    "Модель: <code>{}</code>\n\nНастройки сохранены в боте, и он уже ими "
+                    "пользуется. Чтобы они пережили переустановку, впишите те же значения "
+                    "в переменные <code>AI_URL</code> и <code>AI_FORMAT</code>.".format(
+                        esc(url), fmt, esc(model)))
+        report.append("• <code>{}</code> ({}) — {}".format(esc(url.replace(base, "…")),
+                                                           fmt, esc(err[:90])))
+    return ("⚠️ Ни один вариант не подошёл.\n\n{}\n\nЕсли везде «404», проверьте Base URL "
+            "в кабинете сервиса. Если «model not found» — название модели в "
+            "<code>AI_MODEL</code>.".format("\n".join(report)))
+
+
+def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
+    """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
+    ok, why = ai_allowed()
+    if not ok:
+        ai_note(kind, why)
+        return None
+    fmt, url, model = ai_conf()
+    out, u, err = ai_call(prompt, max_tokens, fmt, url, model)
+    if u:
+        ai_log(kind, sid, u.get("input_tokens", u.get("prompt_tokens", 0)),
+               u.get("output_tokens", u.get("completion_tokens", 0)))
+    if out:
+        ai_note(kind)
+        return out
+    ai_note(kind, err)
+    print("AI error:", err)
     return None
 
 
@@ -1296,8 +1355,7 @@ def ai_warmup(sid, topic="", full=False):
         "от себя, только материал. Заголовки блоков — заглавными латиницей, как выше. "
         "Без markdown-звёздочек и без таблиц."
     ).format("\n".join(ctx), grammar, blocks, c["level"])
-    return ai_complete(prompt, max_tokens=1600 if full else 900,
-                       kind="warmup", sid=sid)
+    return ai_complete(prompt, max_tokens=1600 if full else 900, kind="warmup", sid=sid)
 
 
 def ai_format_raw(sid, limit=15):
@@ -1528,7 +1586,9 @@ def text_ai_usage():
         lines += ["", "<b>По ученикам</b>"]
         for r in who:
             lines.append("• {} — {}".format(esc(r["name"]), fmt_num(r["t"])))
-    lines += ["", "<i>Модель: {}</i>".format(esc(AI_MODEL))]
+    fmt, url, model = ai_conf()
+    lines += ["", "<i>Модель: {} · формат: {}</i>".format(esc(model), fmt),
+              "<i>Адрес: {}</i>".format(esc(url))]
     if AI_LAST["when"]:
         if AI_LAST["error"]:
             lines += ["", "⚠️ <b>Последняя ошибка</b> ({}, {}):\n<code>{}</code>".format(
@@ -1539,41 +1599,33 @@ def text_ai_usage():
 
 
 def ai_selftest():
-    """Короткая проверка связи с ИИ. Возвращает текст для чата."""
+    """Проверка связи: если текущие настройки не работают — подбирает рабочие."""
     if not AI_KEY:
         return "🤖 AI_KEY не задан — переменная пустая или не сохранилась в панели."
-    res = ai_complete("Ответь одним словом: готово", max_tokens=20, kind="test")
-    if res:
+    fmt, url, model = ai_conf()
+    out, u, err = ai_call("Ответь одним словом: готово", 20, fmt, url, model, timeout=40)
+    if out:
+        ai_note("test")
+        if u:
+            ai_log("test", None, u.get("input_tokens", u.get("prompt_tokens", 0)),
+                   u.get("output_tokens", u.get("completion_tokens", 0)))
         return ("✅ ИИ отвечает.\nМодель: <code>{}</code>\nОтвет: {}\n\n"
                 "Формат: {} · адрес: <code>{}</code>".format(
-                    esc(AI_MODEL), esc(res[:60]), AI_FORMAT, esc(AI_URL)))
-    hint = ""
-    err = AI_LAST["error"] or "нет ответа"
+                    esc(model), esc(out[:60]), fmt, esc(url)))
+    ai_note("test", err)
     low = err.lower()
-    anthropic_url = "api.anthropic.com" in AI_URL
-    if not AI_KEY.startswith("sk-ant-") and anthropic_url:
-        return ("⚠️ Ключ и адрес не совпадают.\n\nКлюч начинается не с "
-                "<code>sk-ant-</code>, значит он выдан сервисом-посредником, а запросы "
-                "уходят напрямую в Anthropic — там такой ключ не знают.\n\n"
-                "В настройках посредника найдите Base URL и укажите:\n"
-                "• <code>AI_URL</code> — их адрес\n"
-                "• <code>AI_FORMAT</code> — <code>openai</code>, если у них Chat "
-                "Completions, или <code>anthropic</code>, если Messages\n"
-                "• <code>AI_MODEL</code> — название модели так, как оно написано у них\n\n"
-                "Ошибка сервиса: <code>{}</code>".format(esc(err)))
-    if "not_found" in low or "404" in low or "model" in low:
-        hint = ("\n\n<i>Похоже, дело в названии модели. Проверьте AI_MODEL — "
-                "рабочие варианты: claude-haiku-4-5-20251001, claude-sonnet-5.</i>")
-    elif "authentication" in low or "401" in low or "invalid x-api-key" in low:
-        hint = "\n\n<i>Ключ не принят: проверьте AI_KEY, он мог скопироваться с пробелом.</i>"
-    elif "credit" in low or "billing" in low or "402" in low:
-        hint = "\n\n<i>Нет средств на балансе Anthropic.</i>"
-    elif "429" in low:
-        hint = "\n\n<i>Слишком часто — лимит запросов. Подождите минуту.</i>"
-    elif "timed out" in low or "timeout" in low:
-        hint = "\n\n<i>Сервис не ответил вовремя. Часто бывает с самыми большими моделями.</i>"
-    return "⚠️ ИИ не отвечает.\nМодель: <code>{}</code>\nОшибка: <code>{}</code>{}".format(
-        esc(AI_MODEL), esc(err), hint)
+    if "authentication" in low or "401" in low or "invalid" in low and "key" in low:
+        return ("⚠️ Ключ не принят сервисом.\nОшибка: <code>{}</code>\n\n"
+                "Проверьте <code>AI_KEY</code> — он мог скопироваться не целиком или с "
+                "пробелом. И убедитесь, что ключ не заморожен в кабинете.".format(esc(err)))
+    if "credit" in low or "billing" in low or "402" in low or "баланс" in low:
+        return "⚠️ Сервис говорит, что закончились средства или токены:\n<code>{}</code>".format(
+            esc(err))
+    if "429" in low:
+        return "⚠️ Слишком часто — сервис ограничил запросы. Подождите минуту и повторите."
+    # 404, неверный путь, непонятный ответ — пробуем подобрать адрес сами
+    return ("⚠️ По текущему адресу сервис не отвечает (<code>{}</code>).\n"
+            "Подбираю рабочее сочетание…\n\n{}".format(esc(err[:90]), ai_probe()))
 
 
 def text_day(chat_id):
@@ -2858,7 +2910,13 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "aitest":
         edit(chat_id, message_id, "🔌 Проверяю связь с ИИ…", [])
         return edit(chat_id, message_id, ai_selftest(),
-                    [[("🔄 Ещё раз", "aitest")], [("⬅️ К ученикам", "menu")]])
+                    [[("🔎 Подобрать адрес", "aiprobe")], [("🔄 Ещё раз", "aitest")],
+                     [("⬅️ К ученикам", "menu")]])
+
+    if cmd == "aiprobe":
+        edit(chat_id, message_id, "🔎 Перебираю варианты подключения…", [])
+        return edit(chat_id, message_id, ai_probe(),
+                    [[("🔄 Проверить", "aitest")], [("⬅️ К ученикам", "menu")]])
 
     if cmd == "report":
         edit(chat_id, message_id, "📊 Собираю сводку…", [])
