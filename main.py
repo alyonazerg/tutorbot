@@ -39,6 +39,17 @@ CURRENCY = "₽"
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 WD_CAP = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 RATE_PRESETS = [(2000, 60), (1500, 45)]
+TEACHER_HANDLE = "alyonapetrowa"
+TEACHER_BIO = (
+    "Преподаватель английского языка, стаж более пяти лет.\n\n"
+    "• МГЛУ им. Мориса Тореза — преподаватель английского и французского\n"
+    "• Магистратура МПГУ — проектирование образовательного опыта\n"
+    "• Действующий преподаватель грамматики и практики речи "
+    "у студентов-лингвистов МПГУ\n\n"
+    "Направления: разговорный, деловой и медицинский английский. "
+    "Для детей — обучение чтению и помощь со школьной программой.\n\n"
+    "Занятия для детей и взрослых, онлайн.")
+LEARNED_IVL = 21
 KIND_MARK = {"move": " 🔁", "once": " 📌"}
 KIND_SHORT = {"move": " п", "once": " р"}
 KIND_WORD = {"move": " перенос", "once": " разово"}
@@ -100,10 +111,16 @@ def send_document(chat_id, filename, content, caption=""):
         return {}
 
 
+def button(text, data):
+    if data.startswith(("http://", "https://", "tg://")):
+        return {"text": text, "url": data}
+    return {"text": text, "callback_data": data}
+
+
 def markup(rows):
     if not rows:
         return None
-    return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in rows]}
+    return {"inline_keyboard": [[button(t, d) for t, d in row] for row in rows]}
 
 
 def strip_html(text):
@@ -172,6 +189,9 @@ CREATE TABLE IF NOT EXISTS words (
     student_id INTEGER, term TEXT, translation TEXT, added_by TEXT,
     due TEXT, ivl INTEGER DEFAULT 0, ease REAL DEFAULT 2.5,
     reps INTEGER DEFAULT 0, lapses INTEGER DEFAULT 0, created TEXT);
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER, on_date TEXT, word_id INTEGER, grade INTEGER);
 CREATE TABLE IF NOT EXISTS state (
     chat_id INTEGER PRIMARY KEY, student_id INTEGER, pending TEXT);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
@@ -183,6 +203,8 @@ MIGRATIONS = [
     ("students", "code", "TEXT"),
     ("students", "code_kid", "TEXT"),
     ("students", "access", "TEXT DEFAULT 'full'"),
+    ("students", "nick", "TEXT"),
+    ("words", "seen", "TEXT"),
 ]
 
 
@@ -390,7 +412,8 @@ def occurrences(sid, count, start=None):
 # --------------------------------------------------------- Интервальное повторение
 
 def due_words(sid, limit=WORDS_PER_SESSION):
-    return q("SELECT * FROM words WHERE student_id=? AND due<=? ORDER BY due, id LIMIT ?",
+    return q("SELECT * FROM words WHERE student_id=? AND due<=? "
+             "ORDER BY due, COALESCE(seen,''), id LIMIT ?",
              (sid, today().isoformat(), limit))
 
 
@@ -422,9 +445,64 @@ def grade_word(word_id, grade):
         ivl = 3 if reps == 0 else max(2, int(round(ivl * ease * 1.3)))
         reps += 1
     due = (today() + timedelta(days=ivl)).isoformat()
-    run("UPDATE words SET ease=?, ivl=?, reps=?, lapses=?, due=? WHERE id=?",
-        (ease, ivl, reps, lapses, due, word_id))
+    run("UPDATE words SET ease=?, ivl=?, reps=?, lapses=?, due=?, seen=? WHERE id=?",
+        (ease, ivl, reps, lapses, due, datetime.now().isoformat(timespec="seconds"), word_id))
+    run("INSERT INTO reviews (student_id, on_date, word_id, grade) VALUES (?,?,?,?)",
+        (w["student_id"], today().isoformat(), word_id, grade))
     return ivl
+
+
+def progress(sid):
+    total = word_count(sid)
+    learned = q("SELECT COUNT(*) c FROM words WHERE student_id=? AND ivl>=?",
+                (sid, LEARNED_IVL), one=True)["c"]
+    started = q("SELECT COUNT(*) c FROM words WHERE student_id=? AND reps>0 AND ivl<?",
+                (sid, LEARNED_IVL), one=True)["c"]
+    fresh = q("SELECT COUNT(*) c FROM words WHERE student_id=? AND reps=0", (sid,), one=True)["c"]
+    week = (today() - timedelta(days=6)).isoformat()
+    month = (today() - timedelta(days=29)).isoformat()
+    rev7 = q("SELECT COUNT(*) c FROM reviews WHERE student_id=? AND on_date>=?",
+             (sid, week), one=True)["c"]
+    days30 = [r["on_date"] for r in
+              q("SELECT DISTINCT on_date FROM reviews WHERE student_id=? AND on_date>=? "
+                "ORDER BY on_date DESC", (sid, month))]
+    acc = q("SELECT COUNT(*) c, SUM(CASE WHEN grade>0 THEN 1 ELSE 0 END) ok "
+            "FROM reviews WHERE student_id=? AND on_date>=?", (sid, month), one=True)
+    streak, day = 0, today()
+    dayset = set(days30)
+    if today().isoformat() not in dayset and (today() - timedelta(days=1)).isoformat() in dayset:
+        day = today() - timedelta(days=1)
+    while day.isoformat() in dayset:
+        streak += 1
+        day -= timedelta(days=1)
+    last = q("SELECT MAX(on_date) d FROM reviews WHERE student_id=?", (sid,), one=True)["d"]
+    return {"total": total, "learned": learned, "started": started, "new": fresh,
+            "pct": round(learned * 100 / total) if total else 0,
+            "rev7": rev7, "days30": len(days30), "streak": streak,
+            "acc": round((acc["ok"] or 0) * 100 / acc["c"]) if acc["c"] else 0,
+            "last": last, "due": due_count(sid)}
+
+
+def nick_of(s):
+    return s["nick"] or "Ученик {}".format(s["id"])
+
+
+def leaderboard(chat_id, me_sid=None, real_names=False):
+    rows = []
+    for s in students(chat_id):
+        p = progress(s["id"])
+        if not p["total"]:
+            continue
+        name = s["name"] if real_names else nick_of(s)
+        rows.append((p["learned"], p["rev7"], name, p, s["id"]))
+    rows.sort(reverse=True)
+    if not rows:
+        return "Пока никто не начал заниматься словами."
+    out = ["{:<14}{:>5}{:>6}{:>6}".format("Кто", "выуч", "%", "7дн")]
+    for learned, rev7, name, p, sid in rows[:15]:
+        mark = "→" if sid == me_sid else " "
+        out.append("{}{:<13}{:>5}{:>6}{:>6}".format(mark, name[:13], learned, p["pct"], rev7))
+    return pre("\n".join(out))
 
 
 def parse_words(text):
@@ -468,6 +546,7 @@ def screen_students(chat_id):
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
     rows.append([("🗓 Неделя", "week"), ("📅 Расписание", "sched_all")])
+    rows.append([("🏆 Рейтинг", "board"), ("💌 Визитка", "promo_me")])
     rows.append([("🗄 Архив", "arch_list"), ("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
@@ -526,7 +605,8 @@ def screen_student(sid):
         [("✅ Провела", "done:%d" % sid), ("📅 Другой датой", "doned:%d" % sid)],
         [("💰 Оплата", "pay:%d" % sid), ("🚫 Отмена урока", "cancel:%d" % sid)],
         [("🔁 Перенести", "move:%d" % sid), ("🗓 Расписание", "sched:%d" % sid)],
-        [("📚 Слова", "words:%d" % sid), ("📋 История", "hist:%d" % sid)],
+        [("📚 Слова", "words:%d" % sid), ("📈 Прогресс", "prog:%d" % sid)],
+        [("📋 История", "hist:%d" % sid)],
         [("📤 Ученику", "share:%d" % sid), ("⚙️ Ещё", "more:%d" % sid)],
         [("⬅️ К ученикам", "menu")],
     ]
@@ -715,6 +795,55 @@ def screen_words(sid):
     return "\n".join(lines), rows
 
 
+def text_progress(sid, own=False):
+    s = student(sid)
+    p = progress(sid)
+    who = "📈 <b>Мой прогресс</b>" if own else "📈 <b>Прогресс — {}</b>".format(esc(s["name"]))
+    body = [
+        "{:<22}{:>6}".format("Всего слов", p["total"]),
+        "{:<22}{:>6}".format("Выучено (30+ дн.)", p["learned"]),
+        "{:<22}{:>5}%".format("Доля выученных", p["pct"]),
+        "{:<22}{:>6}".format("В работе", p["started"]),
+        "{:<22}{:>6}".format("Ещё не начато", p["new"]),
+        "{:<22}{:>6}".format("Повторов за 7 дней", p["rev7"]),
+        "{:<22}{:>6}".format("Дней с занятиями /30", p["days30"]),
+        "{:<22}{:>6}".format("Дней подряд", p["streak"]),
+        "{:<22}{:>5}%".format("Ответов «помню»", p["acc"]),
+        "{:<22}{:>6}".format("Ждут повтора сегодня", p["due"]),
+    ]
+    tail = "\nПоследнее повторение: {}".format(fmt_date(p["last"]) if p["last"] else "ещё не было")
+    return who + "\n" + pre("\n".join(body)) + tail
+
+
+def screen_progress(sid):
+    return text_progress(sid), [[("🏆 Рейтинг", "board")], [("⬅️ Назад", "st:%d" % sid)]]
+
+
+def screen_board(chat_id, me_sid=None, real_names=True):
+    text = ("🏆 <b>Рейтинг по словам</b>\n" + leaderboard(chat_id, me_sid, real_names) +
+            "\nвыуч — слов выучено, % — доля выученных, 7дн — повторов за неделю.")
+    back = "lrn:%d" % me_sid if (me_sid and not real_names) else "menu"
+    return text, [[("⬅️ Назад", back)]]
+
+
+def text_promo():
+    return ("👩‍🏫 <b>Алёна Петрова — репетитор английского</b>\n\n" + TEACHER_BIO +
+            "\n\nЗапись на занятия: @{}".format(TEACHER_HANDLE))
+
+
+def text_share_bot():
+    uname = meta_get("username", "")
+    link = "https://t.me/{}".format(uname) if uname else ""
+    return (text_promo() + ("\n\nА ещё у меня есть бот-тренажёр для слов: {}".format(link)
+                            if link else ""))
+
+
+def screen_welcome():
+    rows = [[("✍️ Записаться на занятия", "https://t.me/" + TEACHER_HANDLE)],
+            [("🔑 У меня есть код", "have_code")]]
+    return text_promo(), rows
+
+
 def screen_share(sid):
     rows = [[("📄 Выписка", "sh_st:%d" % sid)],
             [("💳 Напоминание об оплате", "sh_pay:%d" % sid)],
@@ -828,8 +957,11 @@ def screen_learner(sid):
                  "📚 Слов в словаре: <b>{}</b>".format(total),
                  "На повторение сегодня: <b>{}</b>".format(due)]
         rows = [[("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
-                [("➕ Добавить слова", "lrn_add:%d" % sid)],
-                [("📖 Мои слова", "lw:%d" % sid)],
+                [("➕ Добавить слова", "lrn_add:%d" % sid),
+                 ("📖 Мои слова", "lw:%d" % sid)],
+                [("📈 Мой прогресс", "lrn_prog:%d" % sid),
+                 ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+                [("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
                 [("🔄 Обновить", "lrn:%d" % sid)]]
         return "\n".join(lines), rows
     st = stats(sid)
@@ -855,6 +987,9 @@ def screen_learner(sid):
             [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
             [("➕ Добавить слова", "lrn_add:%d" % sid),
              ("📖 Мои слова", "lw:%d" % sid)],
+            [("📈 Мой прогресс", "lrn_prog:%d" % sid),
+             ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+            [("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
             [("🔄 Обновить", "lrn:%d" % sid)]]
     return "\n".join(lines), rows
 
@@ -928,11 +1063,27 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     sid = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
 
     # экраны словаря доступны и ученику, и педагогу
+    if cmd == "have_code":
+        toast(cq_id)
+        return edit(chat_id, message_id,
+                    "🔑 Отправьте код, который дал преподаватель, обычным сообщением.",
+                    [[("⬅️ Назад", "promo")]])
+
+    if cmd == "promo":
+        toast(cq_id)
+        t, r = screen_welcome()
+        return edit(chat_id, message_id, t, r)
+
     if cmd in ("lrn", "lrn_go", "lrn_add", "lrn_when", "lw", "lw_back", "lwdl",
-               "w_show", "w_g"):
+               "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if learner and not is_owner(user_id):
             sid = learner["id"]
+        if not student(sid):
+            toast(cq_id, "Данные не найдены")
+            return edit(chat_id, message_id,
+                        "⚠️ Не нахожу ваши данные — возможно, доступ сбросился.\n"
+                        "Отправьте код от преподавателя ещё раз.")
         if cmd == "lrn":
             toast(cq_id)
             set_state(chat_id, pending=None)
@@ -955,10 +1106,40 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             toast(cq_id)
             return edit(chat_id, message_id, text_when(sid),
                         [[("⬅️ Назад", "lrn:%d" % sid)]])
-        if cmd in ("lw", "lw_back"):
+        if cmd == "lw":
             toast(cq_id)
             t, r = screen_wpick(sid, learner=True)
             return edit(chat_id, message_id, t, r)
+        if cmd == "lw_back":
+            toast(cq_id)
+            t, r = screen_learner(sid)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_prog":
+            toast(cq_id)
+            s_ = student(sid)
+            return edit(chat_id, message_id, text_progress(sid, own=True),
+                        [[("🏆 Рейтинг", "lrn_board:%d" % sid)],
+                         [("✏️ Ник для рейтинга: {}".format(nick_of(s_)), "lrn_nick:%d" % sid)],
+                         [("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_board":
+            toast(cq_id)
+            s_ = student(sid)
+            t, r = screen_board(s_["chat_id"], me_sid=sid, real_names=False)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_nick":
+            toast(cq_id)
+            set_state(chat_id, student_id=sid, pending={"action": "nick", "sid": sid})
+            return edit(chat_id, message_id,
+                        "✏️ Придумайте ник для рейтинга — его видят другие ученики "
+                        "вместо вашего имени. Напишите его сообщением.",
+                        [[("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_promo":
+            toast(cq_id)
+            send(chat_id, text_share_bot())
+            t, r = screen_learner(sid)
+            return edit(chat_id, message_id,
+                        "💌 Сообщение о занятиях отправлено ниже — перешлите его "
+                        "тому, кому может быть интересно.\n\n" + t, r)
         if cmd == "lwdl":
             w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
             if w and w["student_id"] == sid:
@@ -988,6 +1169,12 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     def show(fn, *a):
         t, r = fn(*a)
         edit(chat_id, message_id, t, r)
+
+    if sid is not None and not student(sid):
+        t, r = screen_students(chat_id)
+        return edit(chat_id, message_id,
+                    "⚠️ Такого ученика в базе нет. Скорее всего, это кнопка из старой "
+                    "карточки, а база была очищена при перезапуске.\n\n" + t, r)
 
     if cmd == "menu":
         set_state(chat_id, student_id=None, pending=None)
@@ -1122,6 +1309,19 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "hist":
         return show(screen_history, sid)
 
+    if cmd == "prog":
+        return show(screen_progress, sid)
+
+    if cmd == "board":
+        t, r = screen_board(chat_id, real_names=True)
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "promo_me":
+        send(chat_id, text_share_bot())
+        t, r = screen_students(chat_id)
+        return edit(chat_id, message_id,
+                    "💌 Визитка отправлена ниже — её можно переслать куда угодно.\n\n" + t, r)
+
     if cmd == "words":
         return show(screen_words, sid)
 
@@ -1154,11 +1354,16 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         else:
             text = {"sh_st": text_statement, "sh_pay": text_reminder,
                     "sh_sch": text_schedule}[cmd](sid)
-        send(chat_id, text)
+        res = send(chat_id, text)
         _t, r = screen_share(sid)
-        return edit(chat_id, message_id,
-                    text + "\n\n⬇️ Это же сообщение продублировано внизу чата — "
-                           "его можно переслать ученику.", r)
+        if res.get("ok"):
+            tail = ("\n\n⬇️ Это же сообщение продублировано внизу чата — "
+                    "его можно переслать ученику.")
+        else:
+            tail = ("\n\n⚠️ Отдельным сообщением отправить не вышло ({}). "
+                    "Перешлите это сообщение — текст целиком выше.".format(
+                        esc(res.get("description", "причина неизвестна"))))
+        return edit(chat_id, message_id, text + tail, r)
 
     if cmd == "more":
         s = student(sid)
@@ -1215,6 +1420,10 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 def handle_pending(chat_id, pending, text, user_id=None):
     action = pending.get("action")
     sid = pending.get("sid")
+    if sid is not None and not student(sid):
+        set_state(chat_id, pending=None)
+        t, r = screen_students(chat_id)
+        return send(chat_id, "⚠️ Такого ученика в базе нет — возможно, база очищалась.\n\n" + t, r)
 
     if action == "words":
         pairs = parse_words(text)
@@ -1232,6 +1441,16 @@ def handle_pending(chat_id, pending, text, user_id=None):
             t, r = screen_learner(sid)
         else:
             t, r = screen_words(sid)
+        return send(chat_id, t, r)
+
+    if action == "nick":
+        nick = re.sub(r"\s+", " ", text.strip())[:20]
+        if not nick:
+            return send(chat_id, "Ник не может быть пустым.")
+        run("UPDATE students SET nick=? WHERE id=?", (nick, sid))
+        set_state(chat_id, pending=None)
+        send(chat_id, "✅ Ник в рейтинге: <b>{}</b>".format(esc(nick)))
+        t, r = screen_learner(sid)
         return send(chat_id, t, r)
 
     if action == "new_student":
@@ -1381,6 +1600,22 @@ def handle_command(chat_id, user_id, text):
     if cmd == "id":
         return send(chat_id, "Ваш Telegram ID: <code>{}</code>".format(user_id))
 
+    if cmd == "db":
+        path = os.path.abspath(DB_PATH)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        n_st = q("SELECT COUNT(*) c FROM students", one=True)["c"]
+        n_l = q("SELECT COUNT(*) c FROM lessons", one=True)["c"]
+        n_p = q("SELECT COUNT(*) c FROM payments", one=True)["c"]
+        n_w = q("SELECT COUNT(*) c FROM words", one=True)["c"]
+        started = meta_get("started_at", "—")
+        return send(chat_id,
+                    "🗄 <b>База</b>\nФайл: <code>{}</code>\nРазмер: {} КБ\n"
+                    "Учеников: {} · занятий: {} · оплат: {} · слов: {}\n"
+                    "Последний запуск бота: {}\n\n"
+                    "Если после перезапуска цифры обнулились — файл лежит не на "
+                    "постоянном диске, поправьте переменную TG_BOT_DB.".format(
+                        path, round(size / 1024, 1), n_st, n_l, n_p, n_w, started))
+
     if cmd in ("start", "help", "menu", "students", "ученики"):
         set_state(chat_id, pending=None)
         t, r = screen_students(chat_id)
@@ -1455,9 +1690,10 @@ def learner_flow(chat_id, user_id, text):
                           (code,), one=True)
                 access = "kid"
         if not found:
-            return send(chat_id, "👋 Это бот вашего преподавателя.\n\n"
-                                 "Отправьте код, который вам дали, — и увидите словарь "
-                                 "для повторения (а если код полный — ещё и свои занятия).")
+            t, r = screen_welcome()
+            hint = ("\n\n<i>Если вы мой ученик — отправьте код, который я вам дала.</i>"
+                    if len(text.strip()) <= 12 else "")
+            return send(chat_id, t + hint, r)
         run("UPDATE students SET tg_user_id=?, access=? WHERE id=?",
             (user_id, access, found["id"]))
         send(chat_id, "✅ Готово, вы подключены.")
@@ -1554,13 +1790,17 @@ def main():
     me = tg("getMe").get("result", {})
     if me.get("username"):
         meta_set("username", me["username"])
+    meta_set("started_at", datetime.now().strftime("%d.%m.%Y %H:%M"))
     print("Бот запущен: @" + str(me.get("username")))
+    print("База данных:", os.path.abspath(DB_PATH),
+          "| учеников:", q("SELECT COUNT(*) c FROM students", one=True)["c"])
     tg("setMyCommands", commands=[
         {"command": "students", "description": "Ученики"},
         {"command": "week", "description": "Ближайшая неделя"},
         {"command": "schedule", "description": "Моё расписание"},
         {"command": "month", "description": "Итоги месяца"},
         {"command": "export", "description": "Выгрузка CSV"},
+        {"command": "db", "description": "Где лежит база"},
         {"command": "help", "description": "Справка"},
     ])
     offset = None
