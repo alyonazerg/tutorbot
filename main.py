@@ -9,6 +9,10 @@ Telegram-бот для репетитора: ученики, оплаты, за�
     TG_OWNER_ID     — ваш Telegram ID, узнать командой /id (желательно)
     TG_BOT_DB       — путь к файлу базы, например /data/tutor.db
     TG_DIGEST_HOUR  — час утренних напоминаний, по умолчанию 9, 0 — выключить
+    TG_BACKUP_HOUR  — час ежедневной копии базы в личку, по умолчанию 22, 0 — выключить
+
+Резервные копии: /backup — прислать файл базы прямо сейчас, /restore — восстановить
+(после команды пришлите боту .db-файл). Раз в сутки копия приходит сама.
 
 Зависимостей нет, только стандартная библиотека Python 3.8+.
 """
@@ -34,6 +38,7 @@ TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("TG_OWNER_ID", "0") or 0)
 DIGEST_HOUR = int(os.environ.get("TG_DIGEST_HOUR", "9") or 0)
 DB_PATH = os.environ.get("TG_BOT_DB", "tutor_tg.db")
+BACKUP_HOUR = int(os.environ.get("TG_BACKUP_HOUR", "22") or 0)  # 0 — выключить
 API = "https://api.telegram.org/bot" + TOKEN + "/"
 CURRENCY = "₽"
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
@@ -162,6 +167,40 @@ def send_document(chat_id, filename, content, caption=""):
     except Exception as e:
         print("sendDocument error:", e)
         return {}
+
+
+def send_file(chat_id, filename, data, caption="", mime="application/octet-stream"):
+    """Отправка бинарного файла (например, базы) как документа."""
+    boundary = uuid.uuid4().hex
+    body = io.BytesIO()
+    body.write(("--%s\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n%s\r\n"
+                % (boundary, chat_id)).encode("utf-8"))
+    if caption:
+        body.write(("--%s\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n%s\r\n"
+                    % (boundary, caption)).encode("utf-8"))
+    body.write(("--%s\r\nContent-Disposition: form-data; name=\"document\"; filename=\"%s\"\r\n"
+                "Content-Type: %s\r\n\r\n" % (boundary, filename, mime)).encode("utf-8"))
+    body.write(data)
+    body.write(("\r\n--%s--\r\n" % boundary).encode("utf-8"))
+    req = urllib.request.Request(API + "sendDocument", data=body.getvalue(), method="POST")
+    req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print("sendDocument error:", e)
+        return {"ok": False, "description": "{}: {}".format(type(e).__name__, e)}
+
+
+def download_file(file_id):
+    """Скачивает файл, присланный в Telegram, и возвращает его байты."""
+    info = tg("getFile", file_id=file_id)
+    path = (info.get("result") or {}).get("file_path")
+    if not path:
+        return None
+    url = "https://api.telegram.org/file/bot{}/{}".format(TOKEN, path)
+    with urllib.request.urlopen(url, timeout=120) as r:
+        return r.read()
 
 
 def button(text, data):
@@ -2711,6 +2750,134 @@ def daily_digest():
                  [[("🔁 Начать", "lrn_go:%d" % s["id"])]])
 
 
+# ---------------------------------------------------------------- Резервные копии
+
+TABLES = (("students", "карточек"), ("lessons", "занятий"), ("payments", "оплат"),
+          ("words", "слов"), ("reviews", "повторов"))
+
+
+def db_snapshot():
+    """Целостный снимок базы (безопасен, даже если бот в этот момент пишет)."""
+    tmp = DB_PATH + ".snapshot"
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(tmp)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    with open(tmp, "rb") as f:
+        data = f.read()
+    os.remove(tmp)
+    return data
+
+
+def db_summary(path=None):
+    """Строка вида «учеников 7 · занятий 142 · слов 310» для подписи к копии."""
+    conn = sqlite3.connect(path or DB_PATH)
+    parts = []
+    try:
+        for table, label in TABLES:
+            try:
+                parts.append("{} {}".format(
+                    label, conn.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]))
+            except sqlite3.Error:
+                pass
+    finally:
+        conn.close()
+    return " · ".join(parts)
+
+
+def backup_db(chat_id, caption=None):
+    try:
+        data = db_snapshot()
+    except Exception as e:
+        return send(chat_id, "⚠️ Не вышло сделать копию: <code>{}: {}</code>".format(
+            type(e).__name__, esc(str(e))))
+    name = "tutor_{}.db".format(datetime.now().strftime("%Y-%m-%d_%H%M"))
+    text = caption or "🗂 Копия базы"
+    res = send_file(chat_id, name, data,
+                    "{}\n{}\n{} КБ".format(text, db_summary(), round(len(data) / 1024, 1)))
+    if not res.get("ok"):
+        send(chat_id, "⚠️ Копия собралась, но Telegram не принял файл: {}".format(
+            esc(str(res.get("description"))[:200])))
+    return res
+
+
+def auto_backup():
+    """Раз в сутки присылает владельцу файл базы."""
+    if not BACKUP_HOUR:
+        return
+    if datetime.now().hour < BACKUP_HOUR or meta_get("backup_date") == today().isoformat():
+        return
+    target = OWNER_ID or owner_home()
+    if not target:
+        return
+    meta_set("backup_date", today().isoformat())
+    backup_db(target, "🗂 Ежедневная копия базы за " + today().strftime("%d.%m.%Y") +
+                      "\nСохраните файл: им можно восстановить бота командой /restore.")
+
+
+def restore_db(chat_id, data, filename=""):
+    """Заменяет базу присланным файлом, предварительно проверив его."""
+    incoming = DB_PATH + ".incoming"
+    with open(incoming, "wb") as f:
+        f.write(data)
+    try:
+        conn = sqlite3.connect(incoming)
+        try:
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("файл повреждён")
+            have = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = [t for t, _ in TABLES if t not in have]
+            if missing:
+                raise sqlite3.DatabaseError("нет таблиц: " + ", ".join(missing))
+        finally:
+            conn.close()
+    except Exception as e:
+        os.remove(incoming)
+        return send(chat_id, "⚠️ Это не похоже на базу бота: <code>{}</code>\n"
+                             "Восстановление отменено, текущая база не тронута.".format(
+                                 esc(str(e))))
+    summary = db_summary(incoming)
+    if os.path.exists(DB_PATH):
+        try:
+            os.replace(DB_PATH, DB_PATH + ".old")
+        except OSError:
+            pass
+    os.replace(incoming, DB_PATH)
+    db().close()
+    return send(chat_id, "♻️ База восстановлена из файла <b>{}</b>.\n{}\n\n"
+                         "Прежняя сохранена рядом как <code>{}</code>.".format(
+                             esc(filename or "копия"), esc(summary),
+                             esc(os.path.basename(DB_PATH) + ".old")))
+
+
+def handle_document(chat_id, doc):
+    """Владелец прислал файл: принимаем .db только сразу после команды /restore."""
+    name = doc.get("file_name") or "файл"
+    pending = get_state(chat_id)["pending"] or {}
+    if pending.get("action") != "restore":
+        return send(chat_id, "Получила файл <b>{}</b>, но ничего с ним не делаю.\n"
+                             "Чтобы восстановить базу из копии, сначала отправьте "
+                             "/restore, а потом файл.".format(esc(name)))
+    set_state(chat_id, pending=None)
+    if not name.lower().endswith(".db"):
+        return send(chat_id, "Нужен файл базы с расширением .db — этот не подходит.")
+    if (doc.get("file_size") or 0) > 45 * 1024 * 1024:
+        return send(chat_id, "Файл слишком большой для Telegram Bot API (лимит ~50 МБ).")
+    try:
+        data = download_file(doc.get("file_id"))
+    except Exception as e:
+        return send(chat_id, "⚠️ Не вышло скачать файл: <code>{}: {}</code>".format(
+            type(e).__name__, esc(str(e))))
+    if not data:
+        return send(chat_id, "⚠️ Telegram не отдал файл. Попробуйте прислать ещё раз.")
+    return restore_db(chat_id, data, name)
+
+
 # --------------------------------------------------------------------- Диспетчер
 
 def is_owner(user_id):
@@ -2722,6 +2889,10 @@ def handle(update):
         msg = update["message"]
         chat_id = msg["chat"]["id"]
         user_id = msg.get("from", {}).get("id")
+        if msg.get("document"):
+            if not is_owner(user_id):
+                return
+            return handle_document(chat_id, msg["document"])
         text = msg.get("text") or ""
         if not text.strip():
             return
@@ -2777,8 +2948,14 @@ def main():
         meta_set("username", me["username"])
     meta_set("started_at", datetime.now().strftime("%d.%m.%Y %H:%M"))
     print("Бот запущен: @" + str(me.get("username")))
-    print("База данных:", os.path.abspath(DB_PATH),
-          "| учеников:", q("SELECT COUNT(*) c FROM students", one=True)["c"])
+    n_students = q("SELECT COUNT(*) c FROM students", one=True)["c"]
+    print("База данных:", os.path.abspath(DB_PATH), "| учеников:", n_students)
+    if OWNER_ID and n_students == 0:
+        send(OWNER_ID, "⚠️ <b>База пустая.</b>\nФайл: <code>{}</code>\n\n"
+                       "Если это после обновления бота — данные не сохранились. "
+                       "Пропишите <code>TG_BOT_DB=/app/data/tutor.db</code> в переменных "
+                       "окружения, затем отправьте /restore и пришлите последнюю копию.".format(
+                           esc(os.path.abspath(DB_PATH))))
     tg("setMyCommands", commands=[
         {"command": "students", "description": "Ученики"},
         {"command": "week", "description": "Ближайшая неделя"},
@@ -2802,7 +2979,7 @@ def main():
             except Exception:
                 traceback.print_exc()
                 report_error(u)
-        for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys):
+        for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys, auto_backup):
             try:
                 job()
             except Exception:
