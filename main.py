@@ -700,8 +700,17 @@ def materials_of(sid):
              (sid,))
 
 
+def upcoming(sid, count=1):
+    """Ближайшие занятия без сегодняшнего, если оно уже отмечено проведённым."""
+    occ = occurrences(sid, count + 3)
+    if q("SELECT 1 FROM lessons WHERE student_id=? AND held_on=? LIMIT 1",
+         (sid, today().isoformat()), one=True):
+        occ = [o for o in occ if o[0] != today()]
+    return occ[:count]
+
+
 def next_lesson_date(sid):
-    occ = occurrences(sid, 1)
+    occ = upcoming(sid, 1)
     return occ[0][0] if occ else None
 
 
@@ -855,7 +864,7 @@ def screen_student(sid):
             (sid, today().isoformat()), one=True)["c"]
     lines.append("Расписание: " + (sl if sl else
                                    ("разовые даты ({})".format(nap) if nap else "не задано")))
-    occ = occurrences(sid, max(st["left"], 3))
+    occ = upcoming(sid, max(st["left"], 3))
     if occ:
         lines.append("Ближайшие: " + ", ".join(
             "{} {}{}".format(fmt_date(d, True), t, KIND_MARK.get(k, "")).strip()
@@ -1368,7 +1377,7 @@ def text_statement(sid):
             mark = "" if l["kind"] == "held" else " (отмена)"
             lines.append("• {}{}{}".format(fmt_date(l["held_on"], True), mark,
                                            " — " + esc(l["note"]) if l["note"] else ""))
-    occ = occurrences(sid, 3)
+    occ = upcoming(sid, 3)
     if occ:
         lines += ["", "Ближайшие занятия: " + ", ".join(
             "{} {}".format(fmt_date(d, True), t).strip() for d, t, _ in occ)]
@@ -1399,7 +1408,7 @@ def text_reminder(sid):
 
 def text_schedule(sid):
     s = sget(sid)
-    occ = occurrences(sid, max(stats(sid)["left"], 4))
+    occ = upcoming(sid, max(stats(sid)["left"], 4))
     if not occ:
         return "Расписание для {} пока не задано.".format(esc(s["name"]))
     body = "\n".join("{:<4}{:<8}{}".format(WD_CAP[d.weekday()], fmt_date(d, True),
@@ -1433,7 +1442,7 @@ def text_invite(sid, kind="full"):
 
 def text_when(sid):
     s = sget(sid)
-    occ = occurrences(sid, 8)
+    occ = upcoming(sid, 8)
     if not occ:
         return ("🗓 Ближайшие занятия пока не назначены.\n"
                 "Преподаватель добавит даты — они появятся здесь.")
@@ -1470,7 +1479,7 @@ def ask_feedback(sid):
 
 def text_next_lesson(sid):
     s = sget(sid)
-    occ = occurrences(sid, 1)
+    occ = upcoming(sid, 1)
     lines = ["📅 <b>Ближайшее занятие</b>"]
     if occ:
         d, t, k = occ[0]
@@ -2060,7 +2069,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id,
                     "📝 Напишите домашнее задание{}.\nМожно с ссылками — ученик получит "
                     "его сразу, если подключён к боту.".format(
-                        " к занятию " + fmt_date(nxt) if nxt else ""),
+                        " к занятию " + fmt_date(nxt) if nxt else
+                        " (дата следующего занятия не назначена)"),
                     [[("⬅️ Назад", "hw:%d" % sid)]])
 
     if cmd == "hwdone":
