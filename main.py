@@ -94,6 +94,7 @@ HELP = (
     "/pay 4 4000 — оплата: 4 занятия, 4000\n"
     "/today — занятия на сегодня со ссылками\n"
     "/ai — расход токенов ИИ\n"
+    "/level C2 — ваш уровень для карточек и упражнений\n"
     "/week — расписание на неделю\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
@@ -229,8 +230,35 @@ def strip_html(text):
     return html.unescape(re.sub(r"<[^>]+>", "", text or ""))
 
 
+def split_text(text, limit=3500):
+    """Режет длинный текст по строкам, чтобы уложиться в лимит Telegram."""
+    out, cur, size = [], [], 0
+    for line in text.split("\n"):
+        chunks = ([line[i:i + limit] for i in range(0, len(line), limit)]
+                  if len(line) > limit else [line])
+        for ch in chunks:
+            if size + len(ch) + 1 > limit and cur:
+                out.append("\n".join(cur))
+                cur, size = [], 0
+            cur.append(ch)
+            size += len(ch) + 1
+    if cur:
+        out.append("\n".join(cur))
+    return out or [""]
+
+
 def send(chat_id, text, rows=None):
     """Отправка с подстраховкой: если Telegram не принял разметку — шлём простым текстом."""
+    if len(text) > 4000:
+        parts = split_text(text)
+        res = None
+        for i, part in enumerate(parts):
+            res = send_one(chat_id, part, rows if i == len(parts) - 1 else None)
+        return res
+    return send_one(chat_id, text, rows)
+
+
+def send_one(chat_id, text, rows=None):
     res = tg("sendMessage", chat_id=chat_id, text=text[:4000], parse_mode="HTML",
              reply_markup=markup(rows), disable_web_page_preview=True)
     if res.get("ok"):
@@ -760,6 +788,12 @@ def send_file(chat_id, file_id, caption=""):
     return tg("sendDocument", chat_id=chat_id, document=file_id, caption=caption[:200])
 
 
+def level_of(sid):
+    """Уровень для заданий: заданный вручную, иначе C2 для своего словаря."""
+    s_ = sget(sid)
+    return s_["level"] or ("C2" if s_["is_self"] else "A2-B1")
+
+
 def zoom_link(s):
     z = (s["zoom"] or "").strip()
     return z if z.startswith("http") else ""
@@ -991,11 +1025,11 @@ def screen_warm(sid):
 
 def send_warmup(chat_id, sid, full=False, topic=""):
     if AI_KEY:
-        ai = ai_warmup(sid, topic=topic, full=full)
+        prompt, ai = ai_warmup(sid, topic=topic, full=full)
         if ai:
             head = "🔥 <b>Warm-up — {}</b>{}\n\n".format(
                 esc(sget(sid)["name"]), " · " + esc(topic) if topic else "")
-            return send(chat_id, head + esc(ai))
+            return send_ai(chat_id, head + esc(ai), prompt, ai, "warmup", sid)
         send(chat_id, "⚠️ ИИ не ответил ({}), собрала по шаблону.\n"
                       "Проверить связь: /aitest".format(esc(AI_LAST["error"][:120] or "—")))
     return send(chat_id, text_warmup(sid))
@@ -1179,6 +1213,49 @@ def ai_note(kind, error=""):
         AI_LAST["ok"] = AI_LAST.get("ok", 0) + 1
 
 
+def ai_remember(chat_id, prompt, output, kind, sid):
+    """Запоминает последний запрос к ИИ, чтобы его можно было дополнить."""
+    meta_set("lastai:%d" % chat_id, json.dumps(
+        {"prompt": prompt[:6000], "output": output[:6000], "kind": kind, "sid": sid}))
+
+
+def ai_last(chat_id):
+    raw = meta_get("lastai:%d" % chat_id)
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def send_ai(chat_id, text, prompt, output, kind, sid=None, extra_rows=None):
+    """Отправляет результат ИИ и даёт кнопку, чтобы дописать к нему уточнение."""
+    ai_remember(chat_id, prompt, output, kind, sid)
+    rows = []
+    if AI_LAST.get("truncated"):
+        text += "\n\n<i>Ответ оборвался на середине — нажмите «Продолжить».</i>"
+        rows.append([("▶️ Продолжить", "aicont")])
+    rows.append([("✏️ Дополнить или переделать", "airefine")])
+    return send(chat_id, text, rows + (extra_rows or []))
+
+
+def ai_refine(chat_id, request, max_tokens=3000):
+    """Повторный запрос с учётом того, что уже было выдано, и новой просьбы."""
+    last = ai_last(chat_id)
+    if not last:
+        return None, "Нечего дополнять — сначала попросите что-нибудь сгенерировать."
+    prompt = ("{}\n\n--- Ты уже прислал этот вариант ---\n{}\n\n"
+              "--- Преподаватель просит доработать ---\n{}\n\n"
+              "Выдай новый вариант целиком, с учётом просьбы. Сохрани прежний формат "
+              "и структуру блоков, если не просят другого.").format(
+                  last["prompt"], last["output"], request)
+    out = ai_complete(prompt, max_tokens=max_tokens,
+                      kind=last.get("kind", "misc") + "+", sid=last.get("sid"))
+    if not out:
+        return None, "ИИ не ответил: {}".format(AI_LAST["error"][:120] or "—")
+    ai_remember(chat_id, last["prompt"], out, last.get("kind", "misc"), last.get("sid"))
+    return out, ""
+
+
 def ai_conf():
     """Формат, адрес и модель: подобранные автоматически или из переменных окружения."""
     return (meta_get("ai_format") or AI_FORMAT,
@@ -1226,6 +1303,12 @@ def ai_call(prompt, max_tokens, fmt, url, model, timeout=90):
     except Exception as e:
         return None, {}, "{}: {}".format(type(e).__name__, e)
     u = data.get("usage") or {}
+    stop = data.get("stop_reason") or ""
+    try:
+        stop = stop or (data["choices"][0].get("finish_reason") or "")
+    except (KeyError, IndexError, TypeError):
+        pass
+    AI_LAST["truncated"] = stop in ("max_tokens", "length")
     try:
         if fmt == "anthropic":
             out = "".join(b.get("text", "") for b in data.get("content", [])).strip()
@@ -1303,7 +1386,7 @@ def lesson_context(sid, days=30):
     notes = [l["note"] for l in q(
         "SELECT note FROM lessons WHERE student_id=? AND held_on>=? AND note IS NOT NULL "
         "AND note<>'' ORDER BY held_on DESC LIMIT 5", (sid, since))]
-    return {"name": s_["name"], "level": s_["level"] or "A2-B1", "words": list(ws),
+    return {"name": s_["name"], "level": level_of(sid), "words": list(ws),
             "hard": list(hard), "hw": hw["text"] if hw else "", "notes": notes}
 
 
@@ -1311,7 +1394,7 @@ def ai_warmup(sid, topic="", full=False):
     """Разминка к занятию по лексике и грамматике, с которыми ученик работал."""
     c = lesson_context(sid)
     if not c["words"] and not topic:
-        return None
+        return "", None
     pairs = "; ".join("{} — {}".format(w["term"], w["translation"]) for w in c["words"])
     weak = ", ".join(h["term"] for h in c["hard"])
     ctx = ["Ученик: {}, уровень {}.".format(c["name"], c["level"]),
@@ -1355,7 +1438,52 @@ def ai_warmup(sid, topic="", full=False):
         "от себя, только материал. Заголовки блоков — заглавными латиницей, как выше. "
         "Без markdown-звёздочек и без таблиц."
     ).format("\n".join(ctx), grammar, blocks, c["level"])
-    return ai_complete(prompt, max_tokens=1600 if full else 900, kind="warmup", sid=sid)
+    return prompt, ai_complete(prompt, max_tokens=3000 if full else 1400,
+                               kind="warmup", sid=sid)
+
+
+def ai_fix_words(sid, pairs):
+    """Чинит опечатки, приводит к начальной форме и проверяет перевод.
+    Возвращает (исправленные пары, список заметок об исправлениях)."""
+    ok, _ = ai_allowed()
+    if not ok or not pairs:
+        return pairs, []
+    body = "\n".join("{}. {} = {}".format(i + 1, t, tr) for i, (t, tr) in enumerate(pairs))
+    prompt = (
+        "Ты редактируешь словарь ученика английского (уровень {}).\n"
+        "Для каждой пары «слово = перевод» сделай следующее:\n"
+        "— исправь опечатку в английском слове (strick → strict), если она есть;\n"
+        "— приведи к начальной форме: глагол без to, существительное в единственном "
+        "числе, прилагательное в положительной степени. Не трогай устойчивые выражения "
+        "и фразовые глаголы;\n"
+        "— проверь перевод: если он неверен или не соответствует форме, исправь; "
+        "перевод давай в начальной форме и не длиннее трёх слов.\n\n{}\n\n"
+        "Верни массив объектов: n (номер), term, translation, note — что именно "
+        "исправлено, по-русски и очень коротко; если ничего не менял, note — пустая "
+        "строка."
+    ).format(level_of(sid), body)
+    data = ai_json(prompt, max_tokens=120 * len(pairs) + 300, kind="spell", sid=sid)
+    if not isinstance(data, list):
+        return pairs, []
+    out, notes = list(pairs), []
+    for obj in data:
+        if not isinstance(obj, dict):
+            continue
+        try:
+            i = int(obj.get("n", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= i < len(out):
+            continue
+        term = str(obj.get("term") or out[i][0])[:100].strip()
+        tr = str(obj.get("translation") or out[i][1])[:150].strip()
+        if (term, tr) != out[i]:
+            notes.append("{} → {} — {}".format(
+                out[i][0] if term != out[i][0] else out[i][1],
+                term if term != out[i][0] else tr,
+                str(obj.get("note") or "поправлено")[:80]))
+            out[i] = (term, tr)
+    return out, notes
 
 
 def ai_format_raw(sid, limit=15):
@@ -1368,7 +1496,9 @@ def ai_format_raw(sid, limit=15):
         return 0, why
     terms = "; ".join(w["term"] for w in items)
     prompt = (
-        "Ты составляешь словарные карточки для преподавателя английского (уровень C1).\n"
+        "Ты составляешь словарные карточки для преподавателя английского. "
+        "Уровень владения языком: {}, поэтому определения и примеры должны быть "
+        "взрослыми и точными, без упрощений.\n"
         "Слова: {}\n\n"
         "Для каждого слова верни объект с полями:\n"
         "source — слово ровно так, как оно дано выше;\n"
@@ -1381,7 +1511,7 @@ def ai_format_raw(sid, limit=15):
         "example — предложение с этим словом, естественное и не учебное;\n"
         "translation — перевод на русский, 1-3 слова.\n\n"
         "Верни массив объектов в том же порядке."
-    ).format(terms)
+    ).format(level_of(sid), terms)
     data = ai_json(prompt, max_tokens=260 * len(items) + 400, kind="cards", sid=sid)
     if not isinstance(data, list):
         return 0, "ИИ не ответил или вернул непонятный формат. Подробности: /ai"
@@ -1949,26 +2079,33 @@ def text_next_lesson(sid):
 # ---------------------------------------------------------------- Упражнения ИИ
 
 EX_TYPES = [
-    ("translate", "✍️ Перевод фраз", "5 фраз с русского на английский",
+    ("translate", "✍️ Перевод фраз", "5 фраз с русского на английский", ("text",),
      "Составь 5 коротких бытовых фраз по-русски для перевода на английский. В каждой "
      "естественно используется одно из слов ученика. q — фраза по-русски, a — эталонный "
      "перевод."),
-    ("context", "🧩 Слово в контексте", "выбрать верное употребление",
-     "Составь 5 заданий: слово ученика и три варианта предложения (A, B, C), где слово "
-     "употреблено верно только в одном. q — слово и три варианта с новой строки, "
-     "a — верная буква и почему остальные не подходят."),
-    ("error", "🔍 Найди ошибку", "исправить 5 предложений",
-     "Составь 5 предложений со словами ученика, в каждом одна типичная ошибка русскоязычного "
-     "студента (артикль, предлог, время, порядок слов). q — предложение с ошибкой, "
-     "a — исправленный вариант и в чём была ошибка."),
-    ("colloc", "🔗 Сочетаемость", "подобрать пары и предлоги",
-     "Составь 5 заданий на сочетаемость слов ученика: пропущен предлог или часть устойчивого "
-     "сочетания, пропуск обозначь ______. q — предложение с пропуском, a — что вставить."),
-    ("dialog", "🎭 Мини-диалог", "ответить репликами в ситуации",
+    ("context", "🧩 Слово в контексте", "выбрать верное употребление", ("choice",),
+     "Составь 5 заданий: слово ученика и три предложения, где оно употреблено верно "
+     "только в одном; остальные — правдоподобные, но неверные по смыслу или "
+     "сочетаемости. q — само слово, options — три предложения, correct — номер верного "
+     "с нуля, why — одно предложение, почему верно именно оно."),
+    ("error", "🔍 Найди ошибку", "исправить 5 предложений", ("choice", "text"),
+     "Составь 5 предложений со словами ученика, в каждом одна типичная ошибка "
+     "русскоязычного студента (артикль, предлог, время, порядок слов). q — предложение "
+     "с ошибкой, options — три варианта исправления, correct — номер верного с нуля, "
+     "why — в чём была ошибка. Для письменного формата: a — исправленный вариант "
+     "и объяснение."),
+    ("colloc", "🔗 Сочетаемость", "предлоги и устойчивые пары", ("choice", "text"),
+     "Составь 5 заданий на сочетаемость слов ученика: в предложении пропущен предлог "
+     "или часть устойчивого сочетания, пропуск обозначь ______. q — предложение "
+     "с пропуском, options — три варианта вставки, correct — номер верного с нуля, "
+     "why — короткое пояснение. Для письменного формата: a — что вставить."),
+    ("dialog", "🎭 Мини-диалог", "ответить репликами в ситуации", ("text",),
      "Придумай бытовую ситуацию и 5 реплик собеседника, на которые ученик отвечает, "
      "используя свои слова. q — реплика собеседника и подсказка, какое слово применить, "
      "a — пример подходящего ответа."),
 ]
+
+LETTERS = ("A", "B", "C", "D")
 
 
 def ex_words(sid, n=12):
@@ -1977,7 +2114,7 @@ def ex_words(sid, n=12):
     return ws
 
 
-def ai_exercise(sid, kind):
+def ai_exercise(sid, kind, mode="text"):
     """Генерирует упражнение. Возвращает (данные, причина отказа)."""
     spec = next((x for x in EX_TYPES if x[0] == kind), None)
     if not spec:
@@ -1990,21 +2127,41 @@ def ai_exercise(sid, kind):
         return None, why
     s = sget(sid)
     pairs = "; ".join("{} — {}".format(w["term"], w["translation"]) for w in ws)
+    fields = ("items (массив из 5 объектов с полями q, options из трёх вариантов, "
+              "correct — номер верного варианта начиная с нуля, why — пояснение)"
+              if mode == "choice" else
+              "items (массив из 5 объектов с полями q и a)")
     prompt = (
         "Ты помогаешь ученику практиковать английский по его собственной лексике.\n"
         "Уровень ученика: {}.\nСлова ученика: {}\n\n{}\n\n"
         "Верни объект с полями: title (короткое название по-русски), "
-        "intro (одна строка-инструкция по-русски), items (массив из 5 объектов q и a)."
-    ).format(s["level"] or "A2-B1", pairs, spec[3])
-    data = ai_json(prompt, max_tokens=1100, kind="ex:" + kind, sid=sid)
+        "intro (одна строка-инструкция по-русски), {}."
+    ).format(level_of(sid), pairs, spec[4], fields)
+    data = ai_json(prompt, max_tokens=1300, kind="ex:" + kind, sid=sid)
     if not isinstance(data, dict) or not isinstance(data.get("items"), list):
         return None, "ИИ не ответил. Ключик не потрачен, попробуйте ещё раз."
-    items = [{"q": str(i.get("q", ""))[:400], "a": str(i.get("a", ""))[:400]}
-             for i in data["items"][:6] if isinstance(i, dict) and i.get("q")]
+    items = []
+    for i in data["items"][:6]:
+        if not isinstance(i, dict) or not i.get("q"):
+            continue
+        if mode == "choice":
+            opts = [str(o)[:200] for o in (i.get("options") or []) if str(o).strip()][:4]
+            if len(opts) < 2:
+                continue
+            try:
+                correct = int(i.get("correct", 0))
+            except (TypeError, ValueError):
+                correct = 0
+            items.append({"q": str(i["q"])[:300], "options": opts,
+                          "correct": max(0, min(correct, len(opts) - 1)),
+                          "why": str(i.get("why", ""))[:300]})
+        else:
+            items.append({"q": str(i["q"])[:400], "a": str(i.get("a", ""))[:400]})
     if not items:
         return None, "ИИ вернул пустое задание. Ключик не потрачен."
     return {"title": str(data.get("title") or spec[1])[:80],
-            "intro": str(data.get("intro") or "")[:200], "items": items}, ""
+            "intro": str(data.get("intro") or "")[:200], "items": items,
+            "mode": mode}, ""
 
 
 def ai_check(sid, kind, items, answers):
@@ -2028,16 +2185,70 @@ def screen_ex(sid):
     keys = s["keys"] or 0
     lines = ["🎁 <b>Упражнения</b>", "",
              "Бот составит задание по вашим словам и проверит ответы.",
+             "🔘 — отвечать кнопками, ✍️ — писать самому.",
              "Одно упражнение — один 🔑 ключик.", "",
              "Ключиков у вас: <b>{}</b>".format(keys)]
     if not keys:
         lines += ["", "<i>Ключики дают за: все повторения за день, новую стадию питомца, "
                       "серию без пропусков и победу в рейтинге. Ещё их выдаёт "
                       "преподаватель.</i>"]
-    rows = [[("{} — {}".format(title, hint), "lrn_exgo:%d:%s" % (sid, k))]
-            for k, title, hint, _ in EX_TYPES] if keys else []
+    rows = []
+    if keys:
+        for k, title, hint, modes, _ in EX_TYPES:
+            if len(modes) == 1:
+                mark = "🔘 кнопками" if modes[0] == "choice" else "✍️ письменно"
+                rows.append([("{} · {}".format(title, mark),
+                              "lrn_exgo:%d:%s:%s" % (sid, k, modes[0]))])
+            else:
+                rows.append([("{} · 🔘".format(title), "lrn_exgo:%d:%s:choice" % (sid, k)),
+                             ("✍️", "lrn_exgo:%d:%s:text" % (sid, k))])
     rows.append([("⬅️ Назад", "lrn:%d" % sid)])
     return "\n".join(lines), rows
+
+
+def screen_ex_q(sid, st):
+    """Вопрос с вариантами ответа."""
+    items = st["items"]
+    i = st["i"]
+    it = items[i]
+    body = ["🎁 <b>{}</b>  ·  {} из {}".format(esc(st["title"]), i + 1, len(items)), "",
+            esc(it["q"]), ""]
+    for n, opt in enumerate(it["options"]):
+        body.append("<b>{}.</b> {}".format(LETTERS[n], esc(opt)))
+    rows = [[(LETTERS[n], "lrn_exa:%d:%d" % (sid, n)) for n in range(len(it["options"]))],
+            [("🚫 Прервать", "lrn:%d" % sid)]]
+    return "\n".join(body), rows
+
+
+def screen_ex_result(sid, st, chosen):
+    """Разбор ответа и переход к следующему вопросу."""
+    it = st["items"][st["i"]]
+    ok = chosen == it["correct"]
+    head = "✅ Верно!" if ok else "❌ Мимо. Верный вариант — <b>{}</b>.".format(
+        LETTERS[it["correct"]])
+    body = [head, "", "<b>{}</b>".format(esc(it["options"][it["correct"]]))]
+    if it.get("why"):
+        body += ["", "<i>{}</i>".format(esc(it["why"]))]
+    last = st["i"] + 1 >= len(st["items"])
+    score = st["score"] + (1 if ok else 0)
+    if last:
+        body += ["", "Итог: <b>{} из {}</b>".format(score, len(st["items"]))]
+        rows = [[("🎁 Ещё упражнение", "lrn_ex:%d" % sid)], [("⬅️ В меню", "lrn:%d" % sid)]]
+    else:
+        body.append("")
+        body.append("Счёт: {} из {}".format(score, st["i"] + 1))
+        rows = [[("Дальше ▶️", "lrn_exn:%d" % sid)], [("🚫 Прервать", "lrn:%d" % sid)]]
+    return "\n".join(body), rows
+
+
+def ex_finish(sid, st):
+    """Сохраняет итог теста с кнопками — он попадёт в недельную сводку."""
+    run("INSERT INTO ex_log (on_date, student_id, kind, tasks, answers, feedback) "
+        "VALUES (?,?,?,?,?,?)",
+        (today().isoformat(), sid, st["kind"] + ":choice",
+         "\n".join(it["q"] for it in st["items"])[:2000],
+         "выбор вариантов",
+         "Результат: {} из {}".format(st["score"], len(st["items"]))))
 
 
 def ex_text(data):
@@ -2310,8 +2521,18 @@ def screen_card(sid, word, show=False):
               "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[:2]],
             [("{} · {}".format(n, ivl_label(preview_ivl(word, g))),
               "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[2:]],
-            [("⬅️ Выйти", "lrn:%d" % sid)]]
+            [("🗑 Удалить слово", "w_del:%d:%d" % (sid, word["id"])),
+             ("⬅️ Выйти", "lrn:%d" % sid)]]
     return text, rows
+
+
+def screen_card_del(sid, word):
+    """Подтверждение удаления прямо во время повторения."""
+    return ("🗑 Удалить слово из словаря?\n\n<b>{}</b> — {}\n\n"
+            "<i>Это навсегда: карточка и её история повторений исчезнут.</i>".format(
+                esc(word["term"]), esc(word["translation"] or word["definition"] or "")),
+            [[("🗑 Да, удалить", "w_delok:%d:%d" % (sid, word["id"]))],
+             [("↩️ Нет, вернуться", "w_show:%d:%d" % (sid, word["id"]))]])
 
 
 # ------------------------------------------------------------------------ Экспорт
@@ -2391,8 +2612,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd in ("lrn", "lrn_go", "lrn_add", "lrn_when", "lw", "lw_back", "lwdl",
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
-               "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo",
-               "lrn_words", "lrn_more",
+               "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo", "lrn_exa", "lrn_exn",
+               "lrn_words", "lrn_more", "w_del", "w_delok",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -2436,21 +2657,56 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_exgo":
             kind = parts[2]
+            mode = parts[3] if len(parts) > 3 else "text"
             s_ = sget(sid)
             if (s_["keys"] or 0) < 1:
                 return toast(cq_id, "Нужен ключик")
             toast(cq_id, "Составляю задание…")
             edit(chat_id, message_id, "🎁 Составляю задание по вашим словам…", [])
-            data, why = ai_exercise(sid, kind)
+            data, why = ai_exercise(sid, kind, mode)
             if not data:
                 t, r = screen_ex(sid)
                 return edit(chat_id, message_id, "⚠️ " + esc(why) + "\n\n" + t, r)
             run("UPDATE students SET keys=MAX(COALESCE(keys,0)-1,0) WHERE id=?", (sid,))
+            if mode == "choice":
+                st = {"action": "exq", "sid": sid, "kind": kind, "title": data["title"],
+                      "items": data["items"], "i": 0, "score": 0}
+                set_state(chat_id, student_id=sid, pending=st)
+                t, r = screen_ex_q(sid, st)
+                return edit(chat_id, message_id, t, r)
             set_state(chat_id, student_id=sid,
                       pending={"action": "exdo", "sid": sid, "kind": kind,
                                "items": data["items"]})
             return edit(chat_id, message_id, ex_text(data),
                         [[("🚫 Отменить", "lrn:%d" % sid)]])
+
+        if cmd in ("lrn_exa", "lrn_exn"):
+            st = get_state(chat_id)["pending"] or {}
+            if st.get("action") != "exq":
+                toast(cq_id, "Задание уже закрыто")
+                t, r = screen_ex(sid)
+                return edit(chat_id, message_id, t, r)
+            if cmd == "lrn_exa":
+                chosen = int(parts[2])
+                it = st["items"][st["i"]]
+                ok = chosen == it["correct"]
+                toast(cq_id, "Верно!" if ok else "Не то")
+                t, r = screen_ex_result(sid, st, chosen)
+                st["score"] += 1 if ok else 0
+                st["answered"] = True
+                if st["i"] + 1 >= len(st["items"]):
+                    ex_finish(sid, st)
+                    set_state(chat_id, pending=None)
+                else:
+                    set_state(chat_id, pending=st)
+                return edit(chat_id, message_id, t, r)
+            if not st.pop("answered", False):
+                return toast(cq_id, "Сначала выберите вариант")
+            st["i"] += 1
+            toast(cq_id)
+            set_state(chat_id, pending=st)
+            t, r = screen_ex_q(sid, st)
+            return edit(chat_id, message_id, t, r)
         if cmd == "lrn_pet":
             toast(cq_id)
             t, r = screen_pet(sid)
@@ -2606,6 +2862,24 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
             t, r = screen_card(sid, w, show=True)
             return edit(chat_id, message_id, t, r)
+        if cmd == "w_del":
+            toast(cq_id)
+            w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
+            if not w:
+                return toast(cq_id, "Слово уже удалено")
+            t, r = screen_card_del(sid, w)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "w_delok":
+            wid = int(parts[2])
+            w = q("SELECT * FROM words WHERE id=?", (wid,), one=True)
+            run("DELETE FROM reviews WHERE word_id=?", (wid,))
+            run("DELETE FROM words WHERE id=?", (wid,))
+            toast(cq_id, "Удалено: {}".format(w["term"][:30]) if w else "Удалено")
+            ws = due_words(sid, 1)
+            t, r = screen_card(sid, ws[0] if ws else None)
+            return edit(chat_id, message_id,
+                        "🗑 Слово <b>{}</b> удалено.\n\n".format(esc(w["term"])) + t
+                        if w else t, r)
         if cmd == "w_g":
             ivl = grade_word(int(parts[2]), int(parts[3]))
             toast(cq_id, "Следующий повтор: " + ivl_label(ivl or 0))
@@ -2913,6 +3187,30 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                     [[("🔎 Подобрать адрес", "aiprobe")], [("🔄 Ещё раз", "aitest")],
                      [("⬅️ К ученикам", "menu")]])
 
+    if cmd == "aicont":
+        if not ai_last(chat_id):
+            return toast(cq_id, "Нечего продолжать")
+        toast(cq_id, "Дописываю…")
+        send(chat_id, "▶️ Дописываю…")
+        out, why = ai_refine(chat_id, "Ты не дописал до конца. Продолжи ровно с того "
+                                      "места, где оборвался, не повторяя уже написанное. "
+                                      "Пришли только продолжение.")
+        if not out:
+            return send(chat_id, "⚠️ " + esc(why))
+        last = ai_last(chat_id) or {}
+        return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
+                       last.get("kind", "misc"), last.get("sid"))
+
+    if cmd == "airefine":
+        if not ai_last(chat_id):
+            return toast(cq_id, "Нечего дополнять")
+        set_state(chat_id, pending={"action": "refine"})
+        return edit(chat_id, message_id,
+                    "✏️ Что поменять или добавить? Например: <code>сделай сложнее</code>, "
+                    "<code>добавь пять предложений на Passive</code>, "
+                    "<code>убери говорение, оставь только лексику</code>.",
+                    [[("🚫 Отмена", "menu")]])
+
     if cmd == "aiprobe":
         edit(chat_id, message_id, "🔎 Перебираю варианты подключения…", [])
         return edit(chat_id, message_id, ai_probe(),
@@ -3105,6 +3403,16 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
                     [[("🎁 Ещё упражнение", "lrn_ex:%d" % sid)],
                      [("⬅️ В меню", "lrn:%d" % sid)]])
 
+    if action == "refine":
+        set_state(chat_id, pending=None)
+        send(chat_id, "✏️ Переделываю…")
+        out, why = ai_refine(chat_id, text.strip()[:500])
+        if not out:
+            return send(chat_id, "⚠️ " + esc(why))
+        last = ai_last(chat_id) or {}
+        return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
+                       last.get("kind", "misc"), last.get("sid"))
+
     if action == "warmtopic":
         topic = text.strip()[:120]
         set_state(chat_id, pending=None)
@@ -3137,9 +3445,14 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             return send(chat_id, "Не разобрала. Пришлите слова по одному в строке — "
                                  "можно парой <code>apple - яблоко</code>, можно одним "
                                  "словом.")
-        n = add_words(sid, pairs, pending.get("by", "педагог"))
         me = sget(sid)
         extra = ""
+        notes = []
+        if pairs and AI_KEY:
+            pairs, notes = ai_fix_words(sid, pairs)
+        n = add_words(sid, pairs, pending.get("by", "педагог"))
+        if notes:
+            extra += "\n✏️ Поправила: " + "; ".join(esc(x) for x in notes[:8])
         if bare:
             for it in bare:
                 run("INSERT INTO words (student_id, term, translation, added_by, due, "
@@ -3515,6 +3828,18 @@ def handle_command(chat_id, user_id, text):
     if cmd in ("month", "месяц"):
         t, r = screen_month(chat_id)
         return send(chat_id, t, r)
+
+    if cmd in ("level", "уровень"):
+        me = q("SELECT * FROM students WHERE chat_id=? AND COALESCE(is_self,0)=1",
+               (chat_id,), one=True)
+        if not me:
+            return send(chat_id, "Свой словарь ещё не заведён — откройте «📚 Мой словарь».")
+        val = arg.strip().upper()
+        if val not in ("A1", "A2", "B1", "B2", "C1", "C2"):
+            return send(chat_id, "Ваш уровень: <b>{}</b>\nПоменять: <code>/level C2</code>"
+                        .format(level_of(me["id"])))
+        run("UPDATE students SET level=? WHERE id=?", (val, me["id"]))
+        return send(chat_id, "✅ Ваш уровень для карточек и упражнений: <b>{}</b>".format(val))
 
     if cmd in ("ai", "ии", "токены"):
         return send(chat_id, text_ai_usage(),
@@ -4061,6 +4386,7 @@ def main():
         {"command": "students", "description": "Ученики"},
         {"command": "today", "description": "Занятия сегодня"},
         {"command": "ai", "description": "Расход токенов ИИ"},
+        {"command": "level", "description": "Мой уровень для ИИ-заданий"},
         {"command": "week", "description": "Ближайшая неделя"},
         {"command": "schedule", "description": "Моё расписание"},
         {"command": "month", "description": "Итоги месяца"},
