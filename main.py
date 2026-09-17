@@ -62,6 +62,8 @@ AI_KEY = os.environ.get("AI_KEY", "").strip()
 AI_FORMAT = os.environ.get("AI_FORMAT", "anthropic").strip()
 AI_MODEL = os.environ.get("AI_MODEL", "claude-haiku-4-5-20251001").strip()
 AI_URL = os.environ.get("AI_URL", "https://api.anthropic.com/v1/messages").strip()
+AI_BUDGET = int(os.environ.get("TG_AI_BUDGET", "1000000") or 0)   # всего токенов
+AI_DAILY_CAP = int(os.environ.get("TG_AI_DAILY", "40000") or 0)   # потолок в сутки
 TEACHER_HANDLE = "alyonapetrowa"
 TEACHER_BIO = (
     "Преподаватель английского языка, стаж более пяти лет.\n\n"
@@ -91,6 +93,7 @@ HELP = (
     "/done — занятие сегодня, /done 15.09 — датой\n"
     "/pay 4 4000 — оплата: 4 занятия, 4000\n"
     "/today — занятия на сегодня со ссылками\n"
+    "/ai — расход токенов ИИ\n"
     "/week — расписание на неделю\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
@@ -333,6 +336,14 @@ CREATE TABLE IF NOT EXISTS reviews (
     student_id INTEGER, on_date TEXT, word_id INTEGER, grade INTEGER);
 CREATE TABLE IF NOT EXISTS state (
     chat_id INTEGER PRIMARY KEY, student_id INTEGER, pending TEXT);
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    on_date TEXT, ts TEXT, student_id INTEGER, kind TEXT,
+    in_tok INTEGER DEFAULT 0, out_tok INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ex_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    on_date TEXT, student_id INTEGER, kind TEXT,
+    tasks TEXT, answers TEXT, feedback TEXT);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -348,6 +359,13 @@ MIGRATIONS = [
     ("students", "is_guest", "INTEGER DEFAULT 0"),
     ("students", "zoom", "TEXT"),
     ("students", "pet_name", "TEXT"),
+    ("words", "ipa", "TEXT"),
+    ("words", "definition", "TEXT"),
+    ("words", "syn", "TEXT"),
+    ("words", "ant", "TEXT"),
+    ("words", "coll", "TEXT"),
+    ("words", "example", "TEXT"),
+    ("students", "level", "TEXT"),
     ("students", "keys", "INTEGER DEFAULT 0"),
     ("lessons", "reason", "TEXT"),
     ("payments", "receipt", "TEXT"),
@@ -640,24 +658,41 @@ def last_batch(sid, limit=12):
              "ORDER BY id LIMIT ?", (sid, row["d"], limit))
 
 
+def sm2(ease, ivl, reps, lapses, grade):
+    """Anki-подобный шаг: 0 — Again, 1 — Hard, 2 — Good, 3 — Easy."""
+    ease, ivl, reps, lapses = ease or 2.5, ivl or 0, reps or 0, lapses or 0
+    if grade == 0:
+        return max(1.3, ease - 0.2), 0, reps, lapses + 1
+    if grade == 1:
+        return (max(1.3, ease - 0.15),
+                1 if reps == 0 else max(1, int(round(ivl * 1.2))), reps + 1, lapses)
+    if grade == 2:
+        return ease, 1 if reps == 0 else max(1, int(round(ivl * ease))), reps + 1, lapses
+    return (min(3.0, ease + 0.15),
+            4 if reps == 0 else max(2, int(round(ivl * ease * 1.3))), reps + 1, lapses)
+
+
+def preview_ivl(w, grade):
+    """Через сколько дней слово вернётся при такой оценке (0 — сегодня)."""
+    return sm2(w["ease"], w["ivl"], w["reps"], w["lapses"], grade)[1]
+
+
+def ivl_label(days):
+    if not days:
+        return "сегодня"
+    if days < 30:
+        return "{}д".format(days)
+    if days < 365:
+        return "{}мес".format(max(1, round(days / 30)))
+    return "{}г".format(round(days / 365, 1))
+
+
 def grade_word(word_id, grade):
-    """grade: 0 — не помню, 1 — помню, 2 — легко. Упрощённый SM-2."""
+    """grade: 0 Again, 1 Hard, 2 Good, 3 Easy."""
     w = q("SELECT * FROM words WHERE id=?", (word_id,), one=True)
     if not w:
         return None
-    ease = w["ease"] or 2.5
-    ivl = w["ivl"] or 0
-    reps = w["reps"] or 0
-    lapses = w["lapses"] or 0
-    if grade == 0:
-        ease, ivl, lapses = max(1.3, ease - 0.2), 0, lapses + 1
-    elif grade == 1:
-        ivl = 1 if reps == 0 else max(1, int(round(ivl * ease)))
-        reps += 1
-    else:
-        ease = min(3.0, ease + 0.15)
-        ivl = 3 if reps == 0 else max(2, int(round(ivl * ease * 1.3)))
-        reps += 1
+    ease, ivl, reps, lapses = sm2(w["ease"], w["ivl"], w["reps"], w["lapses"], grade)
     due = (today() + timedelta(days=ivl)).isoformat()
     run("UPDATE words SET ease=?, ivl=?, reps=?, lapses=?, due=?, seen=? WHERE id=?",
         (ease, ivl, reps, lapses, due, datetime.now().isoformat(timespec="seconds"), word_id))
@@ -944,6 +979,9 @@ def screen_raw(sid):
     else:
         lines.append("\nПока пусто.")
     rows = [[("➕ Досыпать слов", "rawadd:%d" % sid)]]
+    if items and AI_KEY and sget(sid)["is_self"]:
+        rows.append([("✨ Оформить через ИИ ({})".format(min(len(items), 15)),
+                      "rawai:%d" % sid)])
     if items:
         rows.append([("✍️ Оформить с переводом", "rawfix:%d" % sid)])
         rows.append([("🧹 Очистить", "rawclear:%d" % sid)])
@@ -1027,9 +1065,55 @@ def screen_fb(sid):
     return "\n".join(lines), rows
 
 
-def ai_complete(prompt, max_tokens=900):
-    """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
+def ai_spent(since=None):
+    """Сколько токенов израсходовано: всего или с указанной даты."""
+    sql = "SELECT COALESCE(SUM(in_tok),0) i, COALESCE(SUM(out_tok),0) o FROM ai_usage"
+    args = ()
+    if since:
+        sql += " WHERE on_date>=?"
+        args = (since,)
+    r = q(sql, args, one=True)
+    return (r["i"] or 0) + (r["o"] or 0)
+
+
+def ai_budget_left():
+    return AI_BUDGET - ai_spent() if AI_BUDGET else None
+
+
+def ai_allowed():
+    """(можно ли звать ИИ, причина отказа)."""
     if not AI_KEY:
+        return False, "ИИ не подключён."
+    if AI_BUDGET and ai_spent() >= AI_BUDGET:
+        return False, "Запас токенов на ИИ исчерпан."
+    if AI_DAILY_CAP and ai_spent(today().isoformat()) >= AI_DAILY_CAP:
+        return False, "Дневной лимит ИИ исчерпан, попробуйте завтра."
+    return True, ""
+
+
+def ai_log(kind, sid, in_tok, out_tok):
+    run("INSERT INTO ai_usage (on_date, ts, student_id, kind, in_tok, out_tok) "
+        "VALUES (?,?,?,?,?,?)",
+        (today().isoformat(), datetime.now().isoformat(timespec="seconds"),
+         sid, kind, in_tok or 0, out_tok or 0))
+    if AI_BUDGET and OWNER_ID:
+        left = ai_budget_left()
+        step = "aiwarn:%d" % (10 if left <= AI_BUDGET * 0.1 else (25 if left <= AI_BUDGET * 0.25
+                                                                 else 0))
+        if step != "aiwarn:0" and meta_get(step) != "1":
+            meta_set(step, "1")
+            send(OWNER_ID, "⚠️ Осталось {} токенов ИИ из {}.".format(
+                fmt_num(left), fmt_num(AI_BUDGET)))
+
+
+def fmt_num(n):
+    return "{:,}".format(int(n)).replace(",", " ")
+
+
+def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
+    """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
+    ok, _ = ai_allowed()
+    if not ok:
         return None
     if AI_FORMAT == "anthropic":
         payload = {"model": AI_MODEL, "max_tokens": max_tokens,
@@ -1046,8 +1130,12 @@ def ai_complete(prompt, max_tokens=900):
     for k, v in headers.items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=90) as r:
             data = json.loads(r.read().decode("utf-8"))
+        u = data.get("usage") or {}
+        ai_log(kind, sid,
+               u.get("input_tokens", u.get("prompt_tokens", 0)),
+               u.get("output_tokens", u.get("completion_tokens", 0)))
         if AI_FORMAT == "anthropic":
             return "".join(b.get("text", "") for b in data.get("content", [])).strip()
         return data["choices"][0]["message"]["content"].strip()
@@ -1076,7 +1164,77 @@ def ai_warmup(sid):
         "эту лексику.\n\n"
         "Оформи простым текстом с заголовками, без markdown-звёздочек, коротко."
     ).format(pairs)
-    return ai_complete(prompt)
+    return ai_complete(prompt, kind="warmup", sid=sid)
+
+
+def ai_format_raw(sid, limit=15):
+    """Оформляет сырые слова: транскрипция, определение, синонимы, пример, перевод."""
+    items = raw_words(sid)[:limit]
+    if not items:
+        return 0, "Сырых слов нет."
+    ok, why = ai_allowed()
+    if not ok:
+        return 0, why
+    terms = "; ".join(w["term"] for w in items)
+    prompt = (
+        "Ты составляешь словарные карточки для преподавателя английского (уровень C1).\n"
+        "Слова: {}\n\n"
+        "Для каждого слова верни объект с полями:\n"
+        'term — слово по-английски (если дано по-русски, подбери английский эквивалент);\n'
+        'ipa — транскрипция в квадратных скобках не нужна, только символы;\n'
+        'definition — определение по-английски, как в толковом словаре, до 15 слов;\n'
+        'syn — 2-3 синонима через запятую;\n'
+        'ant — 1-2 антонима через запятую (пустая строка, если их нет);\n'
+        'coll — одно типичное сочетание с этим словом;\n'
+        'example — предложение с этим словом, естественное и не учебное;\n'
+        'translation — перевод на русский, 1-3 слова.\n\n'
+        "Верни массив объектов в том же порядке."
+    ).format(terms)
+    data = ai_json(prompt, max_tokens=260 * len(items) + 400, kind="cards", sid=sid)
+    if not isinstance(data, list):
+        return 0, "ИИ не ответил или вернул непонятный формат. Попробуйте ещё раз."
+    by_term = {(w["term"] or "").strip().lower(): w for w in items}
+    done = 0
+    for i, obj in enumerate(data):
+        if not isinstance(obj, dict):
+            continue
+        src = by_term.get(str(obj.get("source") or "").strip().lower())
+        if src is None:
+            src = items[i] if i < len(items) else None
+        if src is None:
+            continue
+        run("UPDATE words SET term=?, ipa=?, definition=?, syn=?, ant=?, coll=?, example=?, "
+            "translation=?, raw=0, due=? WHERE id=?",
+            (str(obj.get("term") or src["term"])[:80], str(obj.get("ipa") or "")[:60],
+             str(obj.get("definition") or "")[:300], str(obj.get("syn") or "")[:120],
+             str(obj.get("ant") or "")[:120], str(obj.get("coll") or "")[:120],
+             str(obj.get("example") or "")[:300],
+             str(obj.get("translation") or "")[:120], today().isoformat(), src["id"]))
+        done += 1
+    return done, ""
+
+
+def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
+    """Просит ИИ вернуть JSON и разбирает его. None, если не вышло."""
+    raw = ai_complete(prompt + "\n\nОтветь ТОЛЬКО валидным JSON, без пояснений "
+                               "и без ```.", max_tokens, kind, sid)
+    if not raw:
+        return None
+    raw = raw.strip().strip("`").strip()
+    if raw.lower().startswith("json"):
+        raw = raw[4:].strip()
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    for a, b in (("{", "}"), ("[", "]")):
+        i, j = raw.find(a), raw.rfind(b)
+        if i != -1 and j > i:
+            try:
+                return json.loads(raw[i:j + 1])
+            except ValueError:
+                continue
+    return None
 
 
 def text_warmup(sid):
@@ -1194,6 +1352,48 @@ def screen_month(chat_id):
     text += pre("\n".join(body)) if len(body) > 1 else "\nДанных пока нет."
     text += "\nЗанятий: <b>{}</b>\nОплат: <b>{}</b>".format(lessons, fmt_money(money))
     return text, [[("⬅️ К ученикам", "menu")]]
+
+
+KIND_RU = {"warmup": "разминки", "cards": "оформление карточек", "misc": "прочее"}
+
+
+def text_ai_usage():
+    if not AI_KEY:
+        return "🤖 ИИ не подключён: не задан AI_KEY."
+    week = (today() - timedelta(days=6)).isoformat()
+    month = (today() - timedelta(days=29)).isoformat()
+    tot = ai_spent()
+    lines = ["🤖 <b>Расход ИИ</b>", "",
+             "Сегодня: <b>{}</b>".format(fmt_num(ai_spent(today().isoformat()))),
+             "За неделю: <b>{}</b>".format(fmt_num(ai_spent(week))),
+             "За месяц: <b>{}</b>".format(fmt_num(ai_spent(month))),
+             "Всего: <b>{}</b>{}".format(
+                 fmt_num(tot),
+                 " из {} (осталось {})".format(fmt_num(AI_BUDGET),
+                                               fmt_num(max(AI_BUDGET - tot, 0)))
+                 if AI_BUDGET else "")]
+    if AI_DAILY_CAP:
+        lines.append("Дневной потолок: {}".format(fmt_num(AI_DAILY_CAP)))
+    kinds = q("SELECT kind, SUM(in_tok+out_tok) t, COUNT(*) c FROM ai_usage "
+              "GROUP BY kind ORDER BY t DESC LIMIT 8")
+    if kinds:
+        lines += ["", "<b>По типам</b>"]
+        for k in kinds:
+            name = KIND_RU.get(k["kind"], k["kind"])
+            if k["kind"].startswith("ex:"):
+                name = "упражнение: " + k["kind"][3:]
+            elif k["kind"].startswith("check:"):
+                name = "проверка: " + k["kind"][6:]
+            lines.append("• {} — {} ({})".format(name, fmt_num(k["t"]), k["c"]))
+    who = q("SELECT s.name name, SUM(a.in_tok+a.out_tok) t FROM ai_usage a "
+            "JOIN students s ON s.id=a.student_id GROUP BY a.student_id "
+            "ORDER BY t DESC LIMIT 5")
+    if who:
+        lines += ["", "<b>По ученикам</b>"]
+        for r in who:
+            lines.append("• {} — {}".format(esc(r["name"]), fmt_num(r["t"])))
+    lines += ["", "<i>Модель: {}</i>".format(esc(AI_MODEL))]
+    return "\n".join(lines)
 
 
 def text_day(chat_id):
@@ -1514,6 +1714,108 @@ def text_next_lesson(sid):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- Упражнения ИИ
+
+EX_TYPES = [
+    ("translate", "✍️ Перевод фраз", "5 фраз с русского на английский",
+     "Составь 5 коротких бытовых фраз по-русски для перевода на английский. В каждой "
+     "естественно используется одно из слов ученика. q — фраза по-русски, a — эталонный "
+     "перевод."),
+    ("context", "🧩 Слово в контексте", "выбрать верное употребление",
+     "Составь 5 заданий: слово ученика и три варианта предложения (A, B, C), где слово "
+     "употреблено верно только в одном. q — слово и три варианта с новой строки, "
+     "a — верная буква и почему остальные не подходят."),
+    ("error", "🔍 Найди ошибку", "исправить 5 предложений",
+     "Составь 5 предложений со словами ученика, в каждом одна типичная ошибка русскоязычного "
+     "студента (артикль, предлог, время, порядок слов). q — предложение с ошибкой, "
+     "a — исправленный вариант и в чём была ошибка."),
+    ("colloc", "🔗 Сочетаемость", "подобрать пары и предлоги",
+     "Составь 5 заданий на сочетаемость слов ученика: пропущен предлог или часть устойчивого "
+     "сочетания, пропуск обозначь ______. q — предложение с пропуском, a — что вставить."),
+    ("dialog", "🎭 Мини-диалог", "ответить репликами в ситуации",
+     "Придумай бытовую ситуацию и 5 реплик собеседника, на которые ученик отвечает, "
+     "используя свои слова. q — реплика собеседника и подсказка, какое слово применить, "
+     "a — пример подходящего ответа."),
+]
+
+
+def ex_words(sid, n=12):
+    ws = q("SELECT * FROM words WHERE student_id=? AND COALESCE(raw,0)=0 "
+           "ORDER BY COALESCE(seen,''), id DESC LIMIT ?", (sid, n))
+    return ws
+
+
+def ai_exercise(sid, kind):
+    """Генерирует упражнение. Возвращает (данные, причина отказа)."""
+    spec = next((x for x in EX_TYPES if x[0] == kind), None)
+    if not spec:
+        return None, "Неизвестное упражнение."
+    ws = ex_words(sid)
+    if len(ws) < 4:
+        return None, "Нужно хотя бы 4 слова в словаре."
+    ok, why = ai_allowed()
+    if not ok:
+        return None, why
+    s = sget(sid)
+    pairs = "; ".join("{} — {}".format(w["term"], w["translation"]) for w in ws)
+    prompt = (
+        "Ты помогаешь ученику практиковать английский по его собственной лексике.\n"
+        "Уровень ученика: {}.\nСлова ученика: {}\n\n{}\n\n"
+        "Верни объект с полями: title (короткое название по-русски), "
+        "intro (одна строка-инструкция по-русски), items (массив из 5 объектов q и a)."
+    ).format(s["level"] or "A2-B1", pairs, spec[3])
+    data = ai_json(prompt, max_tokens=1100, kind="ex:" + kind, sid=sid)
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return None, "ИИ не ответил. Ключик не потрачен, попробуйте ещё раз."
+    items = [{"q": str(i.get("q", ""))[:400], "a": str(i.get("a", ""))[:400]}
+             for i in data["items"][:6] if isinstance(i, dict) and i.get("q")]
+    if not items:
+        return None, "ИИ вернул пустое задание. Ключик не потрачен."
+    return {"title": str(data.get("title") or spec[1])[:80],
+            "intro": str(data.get("intro") or "")[:200], "items": items}, ""
+
+
+def ai_check(sid, kind, items, answers):
+    """Проверяет ответы ученика одним запросом. Возвращает текст разбора."""
+    body = "\n\n".join("{}. Задание: {}\nЭталон: {}\nОтвет ученика: {}".format(
+        i + 1, it["q"], it["a"], answers[i] if i < len(answers) else "— (нет ответа)")
+        for i, it in enumerate(items))
+    prompt = (
+        "Ты доброжелательный преподаватель английского. Проверь ответы ученика.\n\n{}\n\n"
+        "Для каждого пункта дай строку: номер, значок (✅ верно, ⚠️ почти, ❌ мимо), "
+        "краткий комментарий по-русски и правильный вариант, если ответ неточный. "
+        "Эталон — ориентир, а не единственно верный ответ: засчитывай любые корректные "
+        "варианты. В конце одна ободряющая строка и счёт вида 4/5. "
+        "Без markdown-звёздочек, коротко."
+    ).format(body)
+    return ai_complete(prompt, max_tokens=700, kind="check:" + kind, sid=sid)
+
+
+def screen_ex(sid):
+    s = sget(sid)
+    keys = s["keys"] or 0
+    lines = ["🎁 <b>Упражнения</b>", "",
+             "Бот составит задание по вашим словам и проверит ответы.",
+             "Одно упражнение — один 🔑 ключик.", "",
+             "Ключиков у вас: <b>{}</b>".format(keys)]
+    if not keys:
+        lines += ["", "<i>Ключики дают за: все повторения за день, новую стадию питомца, "
+                      "серию без пропусков и победу в рейтинге. Ещё их выдаёт "
+                      "преподаватель.</i>"]
+    rows = [[("{} — {}".format(title, hint), "lrn_exgo:%d:%s" % (sid, k))]
+            for k, title, hint, _ in EX_TYPES] if keys else []
+    rows.append([("⬅️ Назад", "lrn:%d" % sid)])
+    return "\n".join(lines), rows
+
+
+def ex_text(data):
+    body = "\n\n".join("<b>{}.</b> {}".format(i + 1, esc(it["q"]))
+                        for i, it in enumerate(data["items"]))
+    return "🎁 <b>{}</b>\n{}\n\n{}\n\n<i>Пришлите ответы одним сообщением, " \
+           "по одному в строке.</i>".format(
+               esc(data["title"]), esc(data["intro"]), body)
+
+
 # ------------------------------------------------------------------- Питомец
 
 def pet(sid):
@@ -1604,9 +1906,12 @@ def pet_jobs():
             meta_set(skey, str(p["stage"]))
         elif int(seen) < p["stage"]:
             meta_set(skey, str(p["stage"]))
-            notify_student(sid, "🎉 <b>{}</b> подрос!\nТеперь это {} {}.".format(
-                esc(p["name"]), p["emoji"], p["title"]),
-                [[("Посмотреть", "lrn_pet:%d" % sid)]])
+            run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
+            notify_student(sid, "🎉 <b>{}</b> подрос!\nТеперь это {} {}.\n"
+                                "За это — 🔑 ключик на упражнение.".format(
+                                    esc(p["name"]), p["emoji"], p["title"]),
+                           [[("🎁 Потратить", "lrn_ex:%d" % sid)],
+                            [("Посмотреть питомца", "lrn_pet:%d" % sid)]])
         if not PET_REMIND_HOUR or now.hour < PET_REMIND_HOUR or now.hour >= 22:
             continue
         rkey = "petrem:%d" % sid
@@ -1654,6 +1959,7 @@ def screen_learner(sid):
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
                  ("📖 Мои слова", "lw:%d" % sid)],
                 [("🧺 Сырые слова ({})".format(len(raw_words(sid))), "rawlist:%d" % sid)],
+                [("🎁 Упражнения ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
                 [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
                 [("⬅️ К ученикам", "menu")]]
         return "\n".join(lines), rows
@@ -1662,15 +1968,15 @@ def screen_learner(sid):
         lines = ["👋 <b>{}</b>".format(esc(s["name"])), "",
                  "📚 Слов в словаре: <b>{}</b>".format(total),
                  "На повторение сегодня: <b>{}</b>".format(due), "", pet_line(sid)]
+        pt = pet(sid)
         rows = zoom_rows(s) + [
                 [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
-                [("🐣 Питомец", "lrn_pet:%d" % sid)],
+                [("{} {}".format(pt["emoji"], pt["name"][:14]), "lrn_pet:%d" % sid),
+                 ("🎁 Задания ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
                  ("📖 Мои слова", "lw:%d" % sid)],
                 [("📈 Мой прогресс", "lrn_prog:%d" % sid),
-                 ("🏆 Рейтинг", "lrn_board:%d" % sid)],
-                [("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
-                [("🔄 Обновить", "lrn:%d" % sid)]]
+                 ("🏆 Рейтинг", "lrn_board:%d" % sid)]]
         return "\n".join(lines), rows
     st = stats(sid)
     ls = q("SELECT * FROM lessons WHERE student_id=? AND kind='held' "
@@ -1695,22 +2001,55 @@ def screen_learner(sid):
         lines.append(pet_line(sid))
     if s["keys"]:
         lines.append("🔑 Ключиков: {} — можно открыть бонусный материал".format(s["keys"]))
-    rows = zoom_rows(s) + [[("📅 Ближайшее занятие", "lrn_next:%d" % sid)]]
+    p = pet(sid)
+    rows = zoom_rows(s) + [
+            [("📅 Занятие", "lrn_next:%d" % sid), ("📎 Материалы", "lrn_mat:%d" % sid)],
+            [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
+            [("{} {}".format(p["emoji"], p["name"][:14]), "lrn_pet:%d" % sid),
+             ("🎁 Упражнения ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
+            [("📚 Словарь", "lrn_words:%d" % sid), ("⚙️ Ещё", "lrn_more:%d" % sid)]]
+    return "\n".join(lines), rows
+
+
+def screen_words_menu(sid):
+    due, total = due_count(sid), word_count(sid)
+    p = progress(sid)
+    return ("📚 <b>Словарь</b>\n\nСлов: <b>{}</b> · выучено: <b>{}</b> ({}%)\n"
+            "На сегодня: <b>{}</b> · дней подряд: <b>{}</b>".format(
+                total, p["learned"], p["pct"], due, p["streak"]),
+            [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
+             [("➕ Добавить слова", "lrn_add:%d" % sid), ("📖 Мои слова", "lw:%d" % sid)],
+             [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+             [("⬅️ Назад", "lrn:%d" % sid)]])
+
+
+def screen_more_menu(sid):
+    s = sget(sid)
+    rows = [[("💳 Оплата", "lrn_pay:%d" % sid), ("🗓 Все даты", "lrn_when:%d" % sid)],
+            [("💬 Отзыв преподавателю", "lrn_fb:%d" % sid)]]
     if s["keys"]:
         rows.append([("🔑 Открыть бонус ({})".format(s["keys"]), "lrn_key:%d" % sid)])
-    rows += [
-            [("📎 Материалы", "lrn_mat:%d" % sid), ("🗓 Все даты", "lrn_when:%d" % sid)],
-            [("💬 Отзыв преподавателю", "lrn_fb:%d" % sid),
-             ("💳 Оплата", "lrn_pay:%d" % sid)],
-            [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
-            [("➕ Добавить слова", "lrn_add:%d" % sid),
-             ("📖 Мои слова", "lw:%d" % sid)],
-            [("🐣 Питомец", "lrn_pet:%d" % sid)],
-            [("📈 Мой прогресс", "lrn_prog:%d" % sid),
-             ("🏆 Рейтинг", "lrn_board:%d" % sid)],
-            [("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
-            [("🔄 Обновить", "lrn:%d" % sid)]]
-    return "\n".join(lines), rows
+    rows += [[("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
+             [("🔄 Обновить", "lrn:%d" % sid), ("⬅️ Назад", "lrn:%d" % sid)]]
+    return "⚙️ <b>Ещё</b>", rows
+
+
+def card_back(w, pro=False):
+    """Оборот карточки: термин, транскрипция, синонимы, сочетаемость, пример, перевод."""
+    lines = ["<b>{}</b>{}".format(esc(w["term"]),
+                                  " [{}]".format(esc(w["ipa"])) if w["ipa"] else "")]
+    if not pro and w["definition"]:
+        lines.append(esc(w["definition"]))
+    for tag, val in (("Syn", w["syn"]), ("Ant", w["ant"]), ("Coll", w["coll"])):
+        if val:
+            lines.append("<i>{}:</i> {}".format(tag, esc(val)))
+    if w["example"]:
+        ex = re.sub(r"(?i)\b({})\b".format(re.escape(w["term"])),
+                    lambda m: "<b>{}</b>".format(m.group(0)), esc(w["example"]))
+        lines += ["", "<i>Ex:</i> {}".format(ex)]
+    if w["translation"]:
+        lines += ["", "🇷🇺 {}".format(esc(w["translation"]))]
+    return "\n".join(lines)
 
 
 def screen_card(sid, word, show=False):
@@ -1723,14 +2062,20 @@ def screen_card(sid, word, show=False):
                 "Всего в словаре: {} слов.".format(word_count(sid)) + tail,
                 [[("{} Питомец".format(p["face"]), "lrn_pet:%d" % sid)],
                  [("⬅️ В меню", "lrn:%d" % sid)]])
-    head = "📚 Осталось: {}\n\n<b>{}</b>".format(due_count(sid), esc(word["term"]))
+    s = sget(sid)
+    pro = bool(s["is_self"]) and bool(word["definition"])
+    head = "📚 Осталось: {}".format(due_count(sid))
+    front = word["definition"] if pro else word["term"]
     if not show:
-        return head, [[("👀 Показать", "w_show:%d:%d" % (sid, word["id"]))],
-                      [("⬅️ Выйти", "lrn:%d" % sid)]]
-    text = head + "\n\n<b>{}</b>".format(esc(word["translation"]))
-    rows = [[("❌ Не помню", "w_g:%d:%d:0" % (sid, word["id"])),
-             ("🤔 С трудом", "w_g:%d:%d:1" % (sid, word["id"])),
-             ("😎 Легко", "w_g:%d:%d:2" % (sid, word["id"]))],
+        return "{}\n\n{}".format(head, esc(front)), [
+            [("👀 Показать", "w_show:%d:%d" % (sid, word["id"]))],
+            [("⬅️ Выйти", "lrn:%d" % sid)]]
+    text = "{}\n\n{}\n➖➖➖\n{}".format(head, esc(front), card_back(word, pro))
+    labels = (("Снова", 0), ("Трудно", 1), ("Хорошо", 2), ("Легко", 3))
+    rows = [[("{} · {}".format(n, ivl_label(preview_ivl(word, g))),
+              "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[:2]],
+            [("{} · {}".format(n, ivl_label(preview_ivl(word, g))),
+              "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[2:]],
             [("⬅️ Выйти", "lrn:%d" % sid)]]
     return text, rows
 
@@ -1812,7 +2157,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd in ("lrn", "lrn_go", "lrn_add", "lrn_when", "lw", "lw_back", "lwdl",
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
-               "lrn_pet", "lrn_petname",
+               "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo",
+               "lrn_words", "lrn_more",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -1841,6 +2187,35 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                         "➕ Пришлите слова одним сообщением, по одному в строке:\n\n"
                         "<code>apple - яблоко\nto give up - сдаться</code>",
                         [[("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_words":
+            toast(cq_id)
+            t, r = screen_words_menu(sid)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_more":
+            toast(cq_id)
+            t, r = screen_more_menu(sid)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_ex":
+            toast(cq_id)
+            t, r = screen_ex(sid)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_exgo":
+            kind = parts[2]
+            s_ = sget(sid)
+            if (s_["keys"] or 0) < 1:
+                return toast(cq_id, "Нужен ключик")
+            toast(cq_id, "Составляю задание…")
+            edit(chat_id, message_id, "🎁 Составляю задание по вашим словам…", [])
+            data, why = ai_exercise(sid, kind)
+            if not data:
+                t, r = screen_ex(sid)
+                return edit(chat_id, message_id, "⚠️ " + esc(why) + "\n\n" + t, r)
+            run("UPDATE students SET keys=MAX(COALESCE(keys,0)-1,0) WHERE id=?", (sid,))
+            set_state(chat_id, student_id=sid,
+                      pending={"action": "exdo", "sid": sid, "kind": kind,
+                               "items": data["items"]})
+            return edit(chat_id, message_id, ex_text(data),
+                        [[("🚫 Отменить", "lrn:%d" % sid)]])
         if cmd == "lrn_pet":
             toast(cq_id)
             t, r = screen_pet(sid)
@@ -1998,7 +2373,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             return edit(chat_id, message_id, t, r)
         if cmd == "w_g":
             ivl = grade_word(int(parts[2]), int(parts[3]))
-            toast(cq_id, "Следующий повтор через {} дн.".format(ivl) if ivl else "Повторим сегодня")
+            toast(cq_id, "Следующий повтор: " + ivl_label(ivl or 0))
             ws = due_words(sid, 1)
             t, r = screen_card(sid, ws[0] if ws else None)
             return edit(chat_id, message_id, t, r)
@@ -2191,6 +2566,20 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                     "Совпавшие сырые слова станут обычными.\n\nСейчас в корзине:\n" + esc(body),
                     [[("⬅️ Назад", "rawlist:%d" % sid)]])
 
+    if cmd == "rawai":
+        toast(cq_id, "Оформляю, это займёт несколько секунд")
+        edit(chat_id, message_id, "✨ Оформляю карточки через ИИ…", [])
+        done, why = ai_format_raw(sid)
+        if not done:
+            flash(chat_id, "⚠️ " + (why or "Не получилось."))
+        else:
+            flash(chat_id, "✅ Оформлено карточек: {}.".format(done))
+            w = q("SELECT * FROM words WHERE student_id=? AND COALESCE(raw,0)=0 "
+                  "ORDER BY id DESC LIMIT 1", (sid,), one=True)
+            if w:
+                send(chat_id, "Пример:\n\n" + card_back(w))
+        return show(screen_raw, sid)
+
     if cmd == "rawclear":
         run("DELETE FROM words WHERE student_id=? AND raw=1", (sid,))
         flash(chat_id, "🧹 Сырые слова очищены.")
@@ -2271,6 +2660,25 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         send(chat_id, body or text_warmup(sid))
         t, r = screen_student(sid)
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "report":
+        edit(chat_id, message_id, "📊 Собираю сводку…", [])
+        body = text_weekly_report(sid)
+        return edit(chat_id, message_id,
+                    body or "За последнюю неделю у ученика нет ни повторений, ни упражнений.",
+                    [[("⬅️ Назад", "st:%d" % sid)]])
+
+    if cmd == "lvl":
+        return edit(chat_id, message_id,
+                    "🎚 Уровень ученика — от него зависят задания, которые генерирует ИИ.",
+                    [[(l, "lvlset:%d:%s" % (sid, l)) for l in ("A1", "A2", "B1")],
+                     [(l, "lvlset:%d:%s" % (sid, l)) for l in ("B2", "C1", "C2")],
+                     [("⬅️ Назад", "st:%d" % sid)]])
+
+    if cmd == "lvlset":
+        run("UPDATE students SET level=? WHERE id=?", (parts[2], sid))
+        flash(chat_id, "✅ Уровень: {}".format(parts[2]))
+        return show(screen_student, sid)
 
     if cmd == "zoom":
         set_state(chat_id, student_id=sid, pending={"action": "zoom", "sid": sid})
@@ -2360,8 +2768,10 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "more":
         s = sget(sid)
         rows = [[("💵 Ставка за занятие", "rate:%d" % sid)],
-                [("🎥 Ссылка на Zoom", "zoom:%d" % sid)],
-                [("🔑 Выдать ключик", "givekey:%d" % sid)],
+                [("🎥 Ссылка на Zoom", "zoom:%d" % sid),
+                 ("🎚 {}".format(s["level"] or "уровень"), "lvl:%d" % sid)],
+                [("🔑 Выдать ключик", "givekey:%d" % sid),
+                 ("📊 Сводка за неделю", "report:%d" % sid)],
                 [("🔗 Код: взрослый", "code:%d" % sid),
                  ("🔗 Код: ребёнок", "codek:%d" % sid)],
                 [("✏️ Переименовать", "ren:%d" % sid)],
@@ -2419,6 +2829,25 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         set_state(chat_id, pending=None)
         t, r = screen_students(chat_id)
         return send(chat_id, "⚠️ Такого ученика в базе нет — возможно, база очищалась.\n\n" + t, r)
+
+    if action == "exdo":
+        items = pending.get("items") or []
+        answers = [l.strip() for l in text.strip().split("\n") if l.strip()]
+        set_state(chat_id, pending=None)
+        send(chat_id, "🔎 Проверяю…")
+        res = ai_check(sid, pending.get("kind", ""), items, answers)
+        if not res:
+            run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
+            return send(chat_id, "⚠️ ИИ не ответил, ключик вернула. Попробуйте позже.",
+                        [[("⬅️ В меню", "lrn:%d" % sid)]])
+        run("INSERT INTO ex_log (on_date, student_id, kind, tasks, answers, feedback) "
+            "VALUES (?,?,?,?,?,?)",
+            (today().isoformat(), sid, pending.get("kind", ""),
+             "\n".join(it["q"] for it in items)[:2000],
+             "\n".join(answers)[:2000], res[:2000]))
+        return send(chat_id, "📝 <b>Разбор</b>\n\n" + esc(res),
+                    [[("🎁 Ещё упражнение", "lrn_ex:%d" % sid)],
+                     [("⬅️ В меню", "lrn:%d" % sid)]])
 
     if action == "petname":
         name = " ".join(text.split())[:24]
@@ -2794,6 +3223,9 @@ def handle_command(chat_id, user_id, text):
         t, r = screen_month(chat_id)
         return send(chat_id, t, r)
 
+    if cmd in ("ai", "ии", "токены"):
+        return send(chat_id, text_ai_usage(), [[("⬅️ К ученикам", "menu")]])
+
     if cmd in ("today", "сегодня", "день"):
         body = text_day(chat_id)
         return send(chat_id, body or "☀️ На сегодня занятий нет.",
@@ -2966,18 +3398,123 @@ def monthly_feedback():
 
 
 def award_keys():
-    """Ключик за день, в который ученик повторил все слова."""
+    """Ключик за полностью повторённый день — не чаще одного раза в неделю."""
+    week = "{}-{:02d}".format(*today().isocalendar()[:2])
     for s in q("SELECT * FROM students WHERE tg_user_id IS NOT NULL"):
         sid = s["id"]
-        if meta_get("key:%d" % sid) == today().isoformat():
+        if meta_get("weekkey:%d" % sid) == week:
             continue
         done = q("SELECT COUNT(*) c FROM reviews WHERE student_id=? AND on_date=?",
                  (sid, today().isoformat()), one=True)["c"]
         if done >= KEY_MIN_REVIEWS and due_count(sid) == 0:
-            meta_set("key:%d" % sid, today().isoformat())
+            meta_set("weekkey:%d" % sid, week)
             run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
-            notify_student(sid, "🔑 Все слова на сегодня повторены — вы заработали ключик! "
-                                "Его можно потратить на бонусный материал.")
+            notify_student(sid, "🔑 Все слова на сегодня повторены — держите ключик!\n"
+                                "Такой даётся раз в неделю; чаще их приносят серии "
+                                "без пропусков и питомец.",
+                           [[("🎁 Потратить", "lrn_ex:%d" % sid)]])
+
+
+def streak_keys():
+    """Ключик за серию дней без пропусков."""
+    for s in q("SELECT * FROM students WHERE tg_user_id IS NOT NULL AND archived=0"):
+        sid = s["id"]
+        st = progress(sid)["streak"]
+        if st not in (7, 14, 30, 60, 100, 200, 365):
+            continue
+        key = "streakkey:%d" % sid
+        if meta_get(key) == str(st):
+            continue
+        meta_set(key, str(st))
+        run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
+        notify_student(sid, "🔥 <b>{} {} подряд!</b>\nДержите 🔑 ключик на упражнение.".format(
+            st, plural(st, ("день", "дня", "дней"))),
+            [[("🎁 Потратить", "lrn_ex:%d" % sid)]])
+
+
+def hard_words(sid, days=7, limit=5):
+    """Слова, которые ученик за период чаще всего забывал."""
+    since = (today() - timedelta(days=days)).isoformat()
+    return q("SELECT w.term term, w.translation tr, COUNT(*) c FROM reviews r "
+             "JOIN words w ON w.id=r.word_id "
+             "WHERE r.student_id=? AND r.on_date>=? AND r.grade=0 "
+             "GROUP BY r.word_id ORDER BY c DESC, w.term LIMIT ?", (sid, since, limit))
+
+
+def text_weekly_report(sid):
+    """Сводка по ученику за неделю: активность, трудные слова, разбор письменных ответов."""
+    s = sget(sid)
+    since = (today() - timedelta(days=7)).isoformat()
+    revs = q("SELECT COUNT(*) c, COUNT(DISTINCT on_date) d FROM reviews "
+             "WHERE student_id=? AND on_date>=?", (sid, since), one=True)
+    logs = q("SELECT * FROM ex_log WHERE student_id=? AND on_date>=? ORDER BY id", (sid, since))
+    hard = hard_words(sid)
+    if not revs["c"] and not logs:
+        return None
+    lines = ["📊 <b>{}</b> — неделя".format(esc(s["name"])), "",
+             "Повторений: <b>{}</b> за {} {}".format(
+                 revs["c"], revs["d"], plural(revs["d"], ("день", "дня", "дней"))),
+             "Упражнений: <b>{}</b>".format(len(logs))]
+    if hard:
+        lines += ["", "<b>Хуже всего даются</b>"]
+        for h in hard:
+            lines.append("• {} — {} ({}×)".format(esc(h["term"]), esc(h["tr"] or ""), h["c"]))
+    if logs and ai_allowed()[0]:
+        body = "\n\n".join("Задания:\n{}\nОтветы ученика:\n{}\nРазбор:\n{}".format(
+            l["tasks"], l["answers"], l["feedback"])[:1800] for l in logs[-3:])
+        res = ai_complete(
+            "Ниже письменные работы ученика ({}, уровень {}) за неделю.\n\n{}\n\n"
+            "Напиши преподавателю по-русски, коротко и по делу:\n"
+            "1) две-три ошибки, которые повторяются;\n"
+            "2) что уже получается уверенно;\n"
+            "3) три конкретные темы или конструкции, которые стоит отработать на занятии.\n"
+            "Без markdown-звёздочек, до 120 слов.".format(
+                s["name"], s["level"] or "не указан", body),
+            max_tokens=450, kind="report", sid=sid)
+        if res:
+            lines += ["", "<b>Что видно по письменным ответам</b>", esc(res)]
+    elif logs:
+        lines += ["", "<i>Разбор от ИИ недоступен: закончились токены или нет ключа.</i>"]
+    return "\n".join(lines)
+
+
+def weekly_report():
+    """По понедельникам присылает преподавателю сводку по каждому ученику."""
+    if today().weekday() != 0 or datetime.now().hour < (DIGEST_HOUR or 9):
+        return
+    wk = today().isoformat()
+    if meta_get("reportweek") == wk:
+        return
+    meta_set("reportweek", wk)
+    for s in q("SELECT * FROM students WHERE archived=0 AND COALESCE(is_guest,0)=0 "
+               "AND COALESCE(is_self,0)=0 AND chat_id IS NOT NULL"):
+        body = text_weekly_report(s["id"])
+        if body:
+            send(s["chat_id"], body, [[("👤 Карточка", "st:%d" % s["id"])]])
+
+
+def weekly_board():
+    """По понедельникам — ключик тому, кто больше всех повторял за неделю."""
+    if today().weekday() != 0:
+        return
+    wk = today().isoformat()
+    if meta_get("boardweek") == wk:
+        return
+    since = (today() - timedelta(days=7)).isoformat()
+    rows = q("SELECT s.id id, s.name name, COUNT(r.id) c FROM students s "
+             "JOIN reviews r ON r.student_id=s.id AND r.on_date>=? "
+             "WHERE s.tg_user_id IS NOT NULL AND s.archived=0 "
+             "GROUP BY s.id ORDER BY c DESC LIMIT 1", (since,))
+    meta_set("boardweek", wk)
+    if not rows or not rows[0]["c"]:
+        return
+    win = rows[0]
+    run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (win["id"],))
+    notify_student(win["id"], "🏆 <b>Вы лучший на прошлой неделе!</b>\n"
+                              "{} {} — и 🔑 ключик в награду.".format(
+                                  win["c"], plural(win["c"], ("повторение", "повторения",
+                                                              "повторений"))),
+                   [[("🎁 Потратить", "lrn_ex:%d" % int(win["id"]))]])
 
 
 def daily_digest():
@@ -3225,6 +3762,7 @@ def main():
     tg("setMyCommands", commands=[
         {"command": "students", "description": "Ученики"},
         {"command": "today", "description": "Занятия сегодня"},
+        {"command": "ai", "description": "Расход токенов ИИ"},
         {"command": "week", "description": "Ближайшая неделя"},
         {"command": "schedule", "description": "Моё расписание"},
         {"command": "month", "description": "Итоги месяца"},
@@ -3247,7 +3785,7 @@ def main():
                 traceback.print_exc()
                 report_error(u)
         for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys,
-                    pet_jobs, auto_backup):
+                    pet_jobs, streak_keys, weekly_board, weekly_report, auto_backup):
             try:
                 job()
             except Exception:
