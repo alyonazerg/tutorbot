@@ -169,7 +169,7 @@ def send_document(chat_id, filename, content, caption=""):
         return {}
 
 
-def send_file(chat_id, filename, data, caption="", mime="application/octet-stream"):
+def send_bytes(chat_id, filename, data, caption="", mime="application/octet-stream"):
     """Отправка бинарного файла (например, базы) как документа."""
     boundary = uuid.uuid4().hex
     body = io.BytesIO()
@@ -708,6 +708,18 @@ def send_file(chat_id, file_id, caption=""):
     return tg("sendDocument", chat_id=chat_id, document=file_id, caption=caption[:200])
 
 
+def announce_material(sid, title, url, for_all=False):
+    """Сообщает ученику (или всем, если материал общий), что появился материал."""
+    rows = [[("🌐 Открыть", url)]] if url.startswith("http") else None
+    body = "📎 <b>Новый материал</b>\n{}".format(esc(title))
+    if for_all:
+        for s in q("SELECT * FROM students WHERE tg_user_id IS NOT NULL AND archived=0 "
+                   "AND COALESCE(is_guest,0)=0 AND COALESCE(is_self,0)=0"):
+            send(s["tg_user_id"], body, rows)
+        return
+    return notify_student(sid, body, rows)
+
+
 def notify_student(sid, text, rows=None):
     s = sget(sid)
     if s["tg_user_id"]:
@@ -932,14 +944,22 @@ def screen_mat(sid):
     s = sget(sid)
     items = materials_of(sid)
     lines = ["📎 <b>Материалы — {}</b>".format(esc(s["name"])), ""]
+    open_rows = []
     if items:
         for m in items:
             tag = "🌐" if m["kind"] == "link" else ("🎁" if m["kind"] == "bonus" else "📄")
             scope = "" if m["student_id"] else " (общий)"
-            lines.append("{} {}{}".format(tag, esc(m["title"]), scope))
+            ref = m["ref"] or ""
+            if ref.startswith("http"):
+                lines.append('{} <a href="{}">{}</a>{}'.format(
+                    tag, esc(ref), esc(m["title"]), scope))
+                lines.append("   <code>{}</code>".format(esc(ref[:80])))
+                open_rows.append([("{} {}".format(tag, m["title"][:28]), ref)])
+            else:
+                lines.append("{} {}{}".format(tag, esc(m["title"]), scope))
     else:
         lines.append("Пока пусто.")
-    rows = [[("🌐 Добавить ссылку", "matlink:%d" % sid)],
+    rows = open_rows + [[("🌐 Добавить ссылку", "matlink:%d" % sid)],
             [("📄 Загрузить файл", "matfile:%d" % sid)],
             [("🎁 Добавить бонус (для ключиков)", "matbonus:%d" % sid)]]
     if items:
@@ -2198,7 +2218,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
 # -------------------------------------------------------------------- Ввод текстом
 
-def handle_pending(chat_id, pending, text, user_id=None):
+def handle_pending(chat_id, pending, text, user_id=None, entities=None):
     action = pending.get("action")
     sid = pending.get("sid")
     if sid is not None and not student(sid):
@@ -2285,16 +2305,30 @@ def handle_pending(chat_id, pending, text, user_id=None):
         for_all = line.lower().startswith("всем")
         if for_all:
             line = line[4:].strip(" -—:")
+        url = None
         m = re.search(r"(https?://\S+)", line)
-        if not m:
-            return send(chat_id, "Нужна ссылка, начинающаяся с http.")
-        url = m.group(1)
-        title = line.replace(url, "").strip(" -—:") or url[:40]
+        if m:
+            url = m.group(1)
+            line = line.replace(url, "")
+        else:
+            # ссылка может быть спрятана под текстом (так вставляет iPhone
+            # и пересланные сообщения) — тогда адрес лежит в entities
+            for e in (entities or []):
+                if e.get("type") == "text_link" and e.get("url"):
+                    url = e["url"]
+                    break
+        if not url:
+            return send(chat_id, "Нужна ссылка. Пришлите её обычным текстом, "
+                                 "начиная с <code>https://</code> — например:\n"
+                                 "<code>Учебник Evolve 5 — https://drive.google.com/…</code>")
+        title = line.strip(" -—:\n") or urllib.parse.urlparse(url).netloc or url[:40]
+        kind = pending.get("kind", "link")
         run("INSERT INTO materials (student_id, kind, title, ref, created) VALUES (?,?,?,?,?)",
-            (0 if for_all else sid, pending.get("kind", "link"), title[:80], url,
-             today().isoformat()))
+            (0 if for_all else sid, kind, title[:80], url, today().isoformat()))
         set_state(chat_id, pending=None)
-        flash(chat_id, "✅ Материал добавлен.")
+        flash(chat_id, "✅ Добавлено: <b>{}</b>\n{}".format(esc(title[:80]), esc(url)))
+        if kind != "bonus":
+            announce_material(sid, title[:80], url, for_all)
         t, r = screen_mat(sid)
         return send(chat_id, t, r)
 
@@ -2797,8 +2831,8 @@ def backup_db(chat_id, caption=None):
             type(e).__name__, esc(str(e))))
     name = "tutor_{}.db".format(datetime.now().strftime("%Y-%m-%d_%H%M"))
     text = caption or "🗂 Копия базы"
-    res = send_file(chat_id, name, data,
-                    "{}\n{}\n{} КБ".format(text, db_summary(), round(len(data) / 1024, 1)))
+    res = send_bytes(chat_id, name, data,
+                     "{}\n{}\n{} КБ".format(text, db_summary(), round(len(data) / 1024, 1)))
     if not res.get("ok"):
         send(chat_id, "⚠️ Копия собралась, но Telegram не принял файл: {}".format(
             esc(str(res.get("description"))[:200])))
@@ -2859,9 +2893,24 @@ def handle_document(chat_id, doc):
     """Владелец прислал файл: принимаем .db только сразу после команды /restore."""
     name = doc.get("file_name") or "файл"
     pending = get_state(chat_id)["pending"] or {}
+
+    if pending.get("action") == "matfile":
+        sid = pending.get("sid")
+        set_state(chat_id, pending=None)
+        if not sget(sid)["id"]:
+            return send(chat_id, "⚠️ Ученик не найден — материал не сохранён.")
+        run("INSERT INTO materials (student_id, kind, title, ref, created) VALUES (?,?,?,?,?)",
+            (sid, "file", name[:80], doc.get("file_id"), today().isoformat()))
+        flash(chat_id, "✅ Файл сохранён: <b>{}</b>".format(esc(name[:80])))
+        notify_student(sid, "📎 <b>Новый материал</b>\n{}".format(esc(name[:80])))
+        t, r = screen_mat(sid)
+        return send(chat_id, t, r)
+
     if pending.get("action") != "restore":
-        return send(chat_id, "Получила файл <b>{}</b>, но ничего с ним не делаю.\n"
-                             "Чтобы восстановить базу из копии, сначала отправьте "
+        return send(chat_id, "Получила файл <b>{}</b>, но ничего с ним не делаю.\n\n"
+                             "Чтобы сохранить его как материал ученика — откройте карточку "
+                             "ученика → 📎 Материалы → «Загрузить файл», и пришлите файл "
+                             "следом.\nЧтобы восстановить базу из копии — отправьте "
                              "/restore, а потом файл.".format(esc(name)))
     set_state(chat_id, pending=None)
     if not name.lower().endswith(".db"):
@@ -2904,7 +2953,7 @@ def handle(update):
             return handle_command(chat_id, user_id, text)
         pending = get_state(chat_id)["pending"]
         if pending:
-            return handle_pending(chat_id, pending, text, user_id)
+            return handle_pending(chat_id, pending, text, user_id, msg.get("entities"))
         t, r = screen_students(chat_id)
         return send(chat_id, t, r)
 
