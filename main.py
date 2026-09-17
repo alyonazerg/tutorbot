@@ -96,6 +96,7 @@ HELP = (
     "/ai — расход токенов ИИ\n"
     "/level C2 — ваш уровень для карточек и упражнений\n"
     "/week — расписание на неделю\n"
+    "/archive — архив учеников\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
     "/id — ваш Telegram ID"
@@ -896,10 +897,8 @@ def screen_students(chat_id):
     if line:
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
-    rows.append([("🗓 Неделя", "week"), ("📅 Расписание", "sched_all")])
-    rows.append([("📚 Мой словарь", "myw"), ("🏆 Рейтинг", "board")])
-    rows.append([("💌 Визитка", "promo_me")])
-    rows.append([("🗄 Архив", "arch_list"), ("📁 CSV", "export")])
+    rows.append([("📚 Мой словарь", "myw"), ("💌 Визитка", "promo_me")])
+    rows.append([("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
     if not students(chat_id):
@@ -1033,6 +1032,27 @@ def send_warmup(chat_id, sid, full=False, topic=""):
         send(chat_id, "⚠️ ИИ не ответил ({}), собрала по шаблону.\n"
                       "Проверить связь: /aitest".format(esc(AI_LAST["error"][:120] or "—")))
     return send(chat_id, text_warmup(sid))
+
+
+def screen_after(sid, lid):
+    """Что сделать сразу после отметки занятия."""
+    s = sget(sid)
+    les = q("SELECT * FROM lessons WHERE id=?", (lid,), one=True)
+    hw = current_hw(sid)
+    nxt = next_lesson_date(sid)
+    lines = ["✅ <b>Занятие с {} записано</b>".format(esc(s["name"])), ""]
+    lines.append("Тема: {}".format(esc(les["note"]) if les and les["note"] else "не записана"))
+    lines.append("Домашка: {}".format(
+        esc(hw["text"][:60]) if hw else "не задана"))
+    if nxt:
+        lines.append("Следующее занятие: {}".format(fmt_date(nxt)))
+    if not s["tg_user_id"]:
+        lines += ["", "<i>Ученик не подключён к боту — уведомления ему не уйдут.</i>"]
+    rows = [[("✍️ Тема занятия", "note:%d:%d" % (sid, lid))],
+            [("📝 Задать домашку", "afterhw:%d:%d" % (sid, lid))],
+            [("📚 Добавить слова с урока", "afterw:%d:%d" % (sid, lid))],
+            [("👤 К карточке", "st:%d" % sid), ("⬅️ К ученикам", "menu")]]
+    return "\n".join(lines), rows
 
 
 def screen_pay(sid):
@@ -2182,12 +2202,14 @@ def ai_check(sid, kind, items, answers):
 
 def screen_ex(sid):
     s = sget(sid)
-    keys = s["keys"] or 0
+    mine = bool(s["is_self"])
+    keys = 1 if mine else (s["keys"] or 0)
     lines = ["🎁 <b>Упражнения</b>", "",
              "Бот составит задание по вашим словам и проверит ответы.",
-             "🔘 — отвечать кнопками, ✍️ — писать самому.",
-             "Одно упражнение — один 🔑 ключик.", "",
-             "Ключиков у вас: <b>{}</b>".format(keys)]
+             "🔘 — отвечать кнопками, ✍️ — писать самому."]
+    lines += (["", "<i>Свои упражнения — без ключиков.</i>"] if mine else
+              ["Одно упражнение — один 🔑 ключик.", "",
+               "Ключиков у вас: <b>{}</b>".format(keys)])
     if not keys:
         lines += ["", "<i>Ключики дают за: все повторения за день, новую стадию питомца, "
                       "серию без пропусков и победу в рейтинге. Ещё их выдаёт "
@@ -2404,8 +2426,8 @@ def screen_learner(sid):
                  ("📖 Мои слова", "lw:%d" % sid)]]
         if raw_n:
             rows.append([("🧺 Без карточки ({})".format(raw_n), "rawlist:%d" % sid)])
-        rows += [[("🎁 Упражнения ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
-                [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+        rows += [[("🎁 Упражнения", "lrn_ex:%d" % sid)],
+                [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "board")],
                 [("⬅️ К ученикам", "menu")]]
         return "\n".join(lines), rows
     if (s["access"] or "full") == "kid":
@@ -2659,7 +2681,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             kind = parts[2]
             mode = parts[3] if len(parts) > 3 else "text"
             s_ = sget(sid)
-            if (s_["keys"] or 0) < 1:
+            if not s_["is_self"] and (s_["keys"] or 0) < 1:
                 return toast(cq_id, "Нужен ключик")
             toast(cq_id, "Составляю задание…")
             edit(chat_id, message_id, "🎁 Составляю задание по вашим словам…", [])
@@ -2667,7 +2689,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             if not data:
                 t, r = screen_ex(sid)
                 return edit(chat_id, message_id, "⚠️ " + esc(why) + "\n\n" + t, r)
-            run("UPDATE students SET keys=MAX(COALESCE(keys,0)-1,0) WHERE id=?", (sid,))
+            if not s_["is_self"]:
+                run("UPDATE students SET keys=MAX(COALESCE(keys,0)-1,0) WHERE id=?", (sid,))
             if mode == "choice":
                 st = {"action": "exq", "sid": sid, "kind": kind, "title": data["title"],
                       "items": data["items"], "i": 0, "score": 0}
@@ -2927,8 +2950,28 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "done":
         lid = record_lesson(chat_id, sid, today())
-        t, r = screen_student(sid)
-        return edit(chat_id, message_id, t, [[("✍️ Добавить тему", "note:%d:%d" % (sid, lid))]] + r)
+        return edit(chat_id, message_id, *screen_after(sid, lid))
+
+    if cmd == "after":
+        return edit(chat_id, message_id, *screen_after(sid, int(parts[2])))
+
+    if cmd == "afterhw":
+        set_state(chat_id, student_id=sid,
+                  pending={"action": "hw", "sid": sid, "lid": int(parts[2]), "after": 1})
+        nxt = next_lesson_date(sid)
+        return edit(chat_id, message_id,
+                    "📝 Что задать на дом{}?\nПришлите текст — ученик получит его сразу."
+                    .format(" к занятию " + fmt_date(nxt) if nxt else ""),
+                    [[("⬅️ Пропустить", "after:%d:%s" % (sid, parts[2]))]])
+
+    if cmd == "afterw":
+        set_state(chat_id, student_id=sid,
+                  pending={"action": "words", "sid": sid, "by": "педагог",
+                           "lid": int(parts[2]), "after": 1})
+        return edit(chat_id, message_id,
+                    "📚 Какие слова с занятия добавить? По одному в строке, можно без "
+                    "перевода — оформлю сама.\n\n<code>coerce - принуждать\nreluctant</code>",
+                    [[("⬅️ Пропустить", "after:%d:%s" % (sid, parts[2]))]])
 
     if cmd == "doned":
         set_state(chat_id, student_id=sid, pending={"action": "lesson_date", "sid": sid})
@@ -2938,8 +2981,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "note":
         set_state(chat_id, student_id=sid,
                   pending={"action": "note", "sid": sid, "lid": int(parts[2])})
-        return edit(chat_id, message_id, "Что прошли на занятии? (тема, ДЗ)",
-                    [[("⬅️ Пропустить", "st:%d" % sid)]])
+        return edit(chat_id, message_id, "✍️ Что прошли на занятии? Одной строкой.",
+                    [[("⬅️ Пропустить", "after:%d:%s" % (sid, parts[2]))]])
 
     if cmd == "cancel":
         rows = [[("Списать занятие", "canc1:%d" % sid)],
@@ -3391,8 +3434,9 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         send(chat_id, "🔎 Проверяю…")
         res = ai_check(sid, pending.get("kind", ""), items, answers)
         if not res:
-            run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
-            return send(chat_id, "⚠️ ИИ не ответил, ключик вернула. Попробуйте позже.",
+            if not sget(sid)["is_self"]:
+                run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
+            return send(chat_id, "⚠️ ИИ не ответил. Попробуйте позже.",
                         [[("⬅️ В меню", "lrn:%d" % sid)]])
         run("INSERT INTO ex_log (on_date, student_id, kind, tasks, answers, feedback) "
             "VALUES (?,?,?,?,?,?)",
@@ -3472,6 +3516,19 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         set_state(chat_id, pending=None)
         flash(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.{}".format(
             n, extra))
+        if pending.get("after"):
+            set_state(chat_id, pending=None)
+            ws = q("SELECT * FROM words WHERE student_id=? ORDER BY id DESC LIMIT ?",
+                   (sid, n))
+            if ws and me["tg_user_id"]:
+                notify_student(sid, "📚 <b>Слова с занятия</b>\n\n{}\n\n"
+                                    "Они уже в вашем словаре — повторим завтра.".format(
+                                        "\n".join("• {} — {}".format(esc(w["term"]),
+                                                                    esc(w["translation"]))
+                                                  for w in reversed(ws))),
+                               [[("🔁 Повторить сейчас", "lrn_go:%d" % sid)]])
+            t, r = screen_after(sid, pending["lid"])
+            return send(chat_id, t, r)
         if pending.get("by") == "ученик":
             owner = None if sget(sid)["is_guest"] else owner_chat(sid)
             if owner:
@@ -3535,7 +3592,10 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             " к занятию " + fmt_date(due) if due else "", esc(text.strip()[:2000])))
         flash(chat_id, "✅ Домашка сохранена{}.".format(
             " и отправлена ученику" if sent else " (ученик не подключён к боту)"))
-        t, r = screen_hw(sid)
+        if pending.get("after"):
+            t, r = screen_after(sid, pending["lid"])
+        else:
+            t, r = screen_hw(sid)
         return send(chat_id, t, r)
 
     if action == "material":
@@ -3658,7 +3718,11 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         run("UPDATE lessons SET note=? WHERE id=?", (text.strip()[:200], pending["lid"]))
         set_state(chat_id, pending=None)
         flash(chat_id, "✅ Тема записана: {}".format(esc(text.strip()[:200])))
-        t, r = screen_student(sid)
+        les = q("SELECT * FROM lessons WHERE id=?", (pending["lid"],), one=True)
+        if les and les["kind"] == "held":
+            t, r = screen_after(sid, pending["lid"])
+        else:
+            t, r = screen_student(sid)
         return send(chat_id, t, r)
 
     if action == "custom_lessons":
@@ -3827,6 +3891,10 @@ def handle_command(chat_id, user_id, text):
 
     if cmd in ("month", "месяц"):
         t, r = screen_month(chat_id)
+        return send(chat_id, t, r)
+
+    if cmd in ("archive", "архив"):
+        t, r = screen_archive(chat_id)
         return send(chat_id, t, r)
 
     if cmd in ("level", "уровень"):
