@@ -39,6 +39,7 @@ CURRENCY = "₽"
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 WD_CAP = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 RATE_PRESETS = [(2000, 60), (1500, 45)]
+BOT_NAME = "Словник"  # как бот называет себя в текстах
 TEACHER_HANDLE = "alyonapetrowa"
 TEACHER_BIO = (
     "Преподаватель английского языка, стаж более пяти лет.\n\n"
@@ -50,6 +51,10 @@ TEACHER_BIO = (
     "Для детей — обучение чтению и помощь со школьной программой.\n\n"
     "Занятия для детей и взрослых, онлайн.")
 LEARNED_IVL = 21
+NICK_ADJ = ["Быстрый", "Тихий", "Ясный", "Смелый", "Лёгкий", "Дерзкий", "Добрый",
+            "Хитрый", "Ловкий", "Яркий", "Северный", "Утренний", "Вечерний", "Звонкий"]
+NICK_NOUN = ["Лис", "Филин", "Ёж", "Барс", "Кит", "Сокол", "Бобр", "Олень",
+             "Тигр", "Краб", "Ворон", "Хорёк", "Пингвин", "Дельфин"]
 KIND_MARK = {"move": " 🔁", "once": " 📌"}
 KIND_SHORT = {"move": " п", "once": " р"}
 KIND_WORD = {"move": " перенос", "once": " разово"}
@@ -263,6 +268,7 @@ MIGRATIONS = [
     ("students", "nick", "TEXT"),
     ("words", "seen", "TEXT"),
     ("students", "is_self", "INTEGER DEFAULT 0"),
+    ("students", "is_guest", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -320,8 +326,29 @@ def set_state(chat_id, student_id=..., pending=...):
 
 def students(chat_id, archived=False):
     return q("SELECT * FROM students WHERE chat_id=? AND archived=? "
-             "AND COALESCE(is_self,0)=0 ORDER BY name",
+             "AND COALESCE(is_self,0)=0 AND COALESCE(is_guest,0)=0 ORDER BY name",
              (chat_id, 1 if archived else 0))
+
+
+def guests(chat_id):
+    return q("SELECT * FROM students WHERE chat_id=? AND COALESCE(is_guest,0)=1 ORDER BY id",
+             (chat_id,))
+
+
+def owner_home():
+    """Чат преподавателя — к нему привязываем гостей."""
+    return int(meta_get("owner_chat", OWNER_ID or 0) or 0)
+
+
+def make_guest(user_id, title=None):
+    home = owner_home()
+    existing = student_by_user(user_id)
+    if existing:
+        return existing
+    nick = gen_nick(home)
+    sid = run("INSERT INTO students (chat_id, name, nick, is_guest, tg_user_id, access) "
+              "VALUES (?,?,?,1,?,'kid')", (home, nick, nick, user_id))
+    return student(sid)
 
 
 def self_student(chat_id, user_id=None):
@@ -340,6 +367,7 @@ def learners(chat_id):
     me = q("SELECT * FROM students WHERE chat_id=? AND is_self=1", (chat_id,), one=True)
     if me:
         rows.append(me)
+    rows += list(guests(chat_id))
     return rows
 
 
@@ -569,6 +597,15 @@ def progress(sid):
             "rev7": rev7, "days30": len(days30), "streak": streak,
             "acc": round((acc["ok"] or 0) * 100 / acc["c"]) if acc["c"] else 0,
             "last": last, "due": due_count(sid)}
+
+
+def gen_nick(chat_id):
+    used = {x["nick"] for x in learners(chat_id) if x["nick"]}
+    for _ in range(60):
+        nick = "{} {}".format(random.choice(NICK_ADJ), random.choice(NICK_NOUN))
+        if nick not in used:
+            return nick
+    return "Гость {}".format(random.randint(100, 999))
 
 
 def nick_of(s):
@@ -916,19 +953,24 @@ def screen_board(chat_id, me_sid=None, real_names=True):
 
 
 def text_promo():
-    return ("👩‍🏫 <b>Алёна Петрова — репетитор английского</b>\n\n" + TEACHER_BIO +
-            "\n\nЗапись на занятия: @{}".format(TEACHER_HANDLE))
+    return ("📚 <b>{}</b> — тренажёр английских слов\n\n"
+            "Добавляете слова с переводом — бот сам напоминает, когда их пора повторить. "
+            "Чем лучше вы помните слово, тем реже оно возвращается: интервалы растут "
+            "от одного дня до месяца, как в Anki. Есть личный прогресс и общий рейтинг.\n\n"
+            "Пользоваться можно без записи на занятия.\n\n"
+            "👩‍🏫 <b>Автор бота — Алёна Петрова</b>\n"
+            "{}\n\nЗапись на занятия: @{}".format(BOT_NAME, TEACHER_BIO, TEACHER_HANDLE))
 
 
 def text_share_bot():
     uname = meta_get("username", "")
     link = "https://t.me/{}".format(uname) if uname else ""
-    return (text_promo() + ("\n\nА ещё у меня есть бот-тренажёр для слов: {}".format(link)
-                            if link else ""))
+    return text_promo() + ("\n\nБот: {}".format(link) if link else "")
 
 
 def screen_welcome():
     rows = [[("✍️ Записаться на занятия", "https://t.me/" + TEACHER_HANDLE)],
+            [("📚 Учить слова", "guest_go")],
             [("🔑 У меня есть код", "have_code")]]
     return text_promo(), rows
 
@@ -1040,6 +1082,24 @@ def text_when(sid):
 
 def screen_learner(sid):
     s = sget(sid)
+    if s["is_guest"]:
+        total, due = word_count(sid), due_count(sid)
+        p = progress(sid)
+        lines = ["📚 <b>{}</b> — тренажёр слов".format(BOT_NAME), "",
+                 "Слов: <b>{}</b> · выучено: <b>{}</b> ({}%)".format(total, p["learned"], p["pct"]),
+                 "На повторение сегодня: <b>{}</b>".format(due),
+                 "Дней подряд: <b>{}</b>".format(p["streak"])]
+        if not total:
+            lines += ["", "Добавьте свои слова — по одному в строке:",
+                      "<code>apple - яблоко</code>",
+                      "Дальше бот сам будет напоминать, что пора повторить."]
+        rows = [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
+                [("➕ Добавить слова", "lrn_add:%d" % sid),
+                 ("📖 Мои слова", "lw:%d" % sid)],
+                [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+                [("✍️ Записаться на занятия", "https://t.me/" + TEACHER_HANDLE)],
+                [("👩‍🏫 О преподавателе", "promo"), ("🔑 У меня есть код", "have_code")]]
+        return "\n".join(lines), rows
     if s["is_self"]:
         total, due = word_count(sid), due_count(sid)
         p = progress(sid)
@@ -1165,6 +1225,12 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     sid = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
 
     # экраны словаря доступны и ученику, и педагогу
+    if cmd == "guest_go":
+        toast(cq_id)
+        g = make_guest(user_id)
+        t, r = screen_learner(g["id"])
+        return edit(chat_id, message_id, t, r)
+
     if cmd == "have_code":
         toast(cq_id)
         return edit(chat_id, message_id,
@@ -1177,7 +1243,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id, t, r)
 
     if cmd in ("lrn", "lrn_go", "lrn_add", "lrn_when", "lw", "lw_back", "lwdl",
-               "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "w_show", "w_g"):
+               "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
+               "w_show", "w_g"):
         learner = student_by_user(user_id)
         if learner and not is_owner(user_id):
             sid = learner["id"]
@@ -1219,9 +1286,20 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         if cmd == "lrn_prog":
             toast(cq_id)
             s_ = sget(sid)
+            if s_["is_guest"]:
+                nick_row = [("🎲 Другой ник: {}".format(nick_of(s_)), "lrn_renick:%d" % sid)]
+            else:
+                nick_row = [("✏️ Ник для рейтинга: {}".format(nick_of(s_)), "lrn_nick:%d" % sid)]
+            return edit(chat_id, message_id, text_progress(sid, own=True),
+                        [[("🏆 Рейтинг", "lrn_board:%d" % sid)], nick_row,
+                         [("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_renick":
+            nick = gen_nick(sget(sid)["chat_id"])
+            run("UPDATE students SET nick=? WHERE id=?", (nick, sid))
+            toast(cq_id, "Теперь вы " + nick)
             return edit(chat_id, message_id, text_progress(sid, own=True),
                         [[("🏆 Рейтинг", "lrn_board:%d" % sid)],
-                         [("✏️ Ник для рейтинга: {}".format(nick_of(s_)), "lrn_nick:%d" % sid)],
+                         [("🎲 Другой ник: {}".format(nick), "lrn_renick:%d" % sid)],
                          [("⬅️ Назад", "lrn:%d" % sid)]])
         if cmd == "lrn_board":
             toast(cq_id)
@@ -1230,6 +1308,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_nick":
             toast(cq_id)
+            if sget(sid)["is_guest"]:
+                nick = gen_nick(sget(sid)["chat_id"])
+                run("UPDATE students SET nick=? WHERE id=?", (nick, sid))
+                return edit(chat_id, message_id, text_progress(sid, own=True),
+                            [[("⬅️ Назад", "lrn:%d" % sid)]])
             set_state(chat_id, student_id=sid, pending={"action": "nick", "sid": sid})
             return edit(chat_id, message_id,
                         "✏️ Придумайте ник для рейтинга — его видят другие ученики "
@@ -1552,6 +1635,9 @@ def handle_pending(chat_id, pending, text, user_id=None):
         return send(chat_id, t, r)
 
     if action == "nick":
+        if sget(sid)["is_guest"]:
+            set_state(chat_id, pending=None)
+            return send(chat_id, "Ник гостям выдаёт бот — его можно только перевыбрать кнопкой 🎲")
         nick = re.sub(r"\s+", " ", text.strip())[:20]
         if not nick:
             return send(chat_id, "Ник не может быть пустым.")
@@ -1705,24 +1791,37 @@ def handle_command(chat_id, user_id, text):
     arg = parts[1].strip() if len(parts) > 1 else ""
     st = get_state(chat_id)
 
+    meta_set("owner_chat", chat_id)
+
     if cmd == "id":
         return send(chat_id, "Ваш Telegram ID: <code>{}</code>".format(user_id))
 
     if cmd == "db":
-        path = os.path.abspath(DB_PATH)
-        size = os.path.getsize(path) if os.path.exists(path) else 0
-        n_st = q("SELECT COUNT(*) c FROM students", one=True)["c"]
-        n_l = q("SELECT COUNT(*) c FROM lessons", one=True)["c"]
-        n_p = q("SELECT COUNT(*) c FROM payments", one=True)["c"]
-        n_w = q("SELECT COUNT(*) c FROM words", one=True)["c"]
-        started = meta_get("started_at", "—")
-        return send(chat_id,
-                    "🗄 <b>База</b>\nФайл: <code>{}</code>\nРазмер: {} КБ\n"
-                    "Учеников: {} · занятий: {} · оплат: {} · слов: {}\n"
-                    "Последний запуск бота: {}\n\n"
-                    "Если после перезапуска цифры обнулились — файл лежит не на "
-                    "постоянном диске, поправьте переменную TG_BOT_DB.".format(
-                        path, round(size / 1024, 1), n_st, n_l, n_p, n_w, started))
+        lines = []
+        try:
+            path = os.path.abspath(DB_PATH)
+            size = os.path.getsize(path) if os.path.exists(path) else 0
+            lines.append("Файл базы: " + path)
+            lines.append("Размер: {} КБ".format(round(size / 1024, 1)))
+            lines.append("Папка доступна для записи: " + (
+                "да" if os.access(os.path.dirname(path) or ".", os.W_OK) else "НЕТ"))
+            for table, label in (("students", "карточек"), ("lessons", "занятий"),
+                                 ("payments", "оплат"), ("words", "слов"),
+                                 ("reviews", "повторов")):
+                n = q("SELECT COUNT(*) c FROM " + table, one=True)["c"]
+                lines.append("{}: {}".format(label, n))
+            lines.append("Последний запуск: " + str(meta_get("started_at", "—")))
+            lines.append("")
+            lines.append("Если после перезапуска цифры обнулились — база лежит "
+                         "не на постоянном диске, поправьте TG_BOT_DB.")
+        except Exception as e:
+            lines.append("Ошибка при чтении базы: {}: {}".format(type(e).__name__, e))
+        body = "\n".join(lines)
+        print("DB INFO:", body.replace("\n", " | "))
+        res = tg("sendMessage", chat_id=chat_id, text=body)
+        if not res.get("ok"):
+            print("DB INFO send failed:", res.get("description"))
+        return res
 
     if cmd in ("start", "help", "menu", "students", "ученики"):
         set_state(chat_id, pending=None)
@@ -1789,8 +1888,41 @@ def handle_command(chat_id, user_id, text):
 
 # ------------------------------------------------------------------ Поток ученика
 
+def bind_code(user_id, text):
+    """Ищет ученика по коду. Возвращает (ученик, доступ) или (None, None)."""
+    code = re.sub(r"[^A-Za-z0-9]", "", text).upper()[:6]
+    if not code:
+        return None, None
+    found = q("SELECT * FROM students WHERE code=? AND code IS NOT NULL "
+              "AND COALESCE(is_guest,0)=0", (code,), one=True)
+    if found:
+        return found, "full"
+    found = q("SELECT * FROM students WHERE code_kid=? AND code_kid IS NOT NULL "
+              "AND COALESCE(is_guest,0)=0", (code,), one=True)
+    if found:
+        return found, "kid"
+    return None, None
+
+
 def learner_flow(chat_id, user_id, text):
     s = student_by_user(user_id)
+
+    # гость ввёл код ученика — переносим его словарь в настоящую карточку
+    if s and s["is_guest"] and len(text.strip()) <= 12:
+        found, access = bind_code(user_id, text)
+        if found:
+            run("UPDATE words SET student_id=? WHERE student_id=?", (found["id"], s["id"]))
+            run("UPDATE reviews SET student_id=? WHERE student_id=?", (found["id"], s["id"]))
+            run("UPDATE students SET tg_user_id=?, access=?, nick=COALESCE(nick,?) WHERE id=?",
+                (user_id, access, s["nick"], found["id"]))
+            run("DELETE FROM students WHERE id=?", (s["id"],))
+            send(chat_id, "✅ Готово, вы подключены. Ваши слова сохранились.")
+            if found["chat_id"]:
+                send(found["chat_id"], "🔗 <b>{}</b> подключился(ась) к боту.".format(
+                    esc(found["name"])))
+            t, r = screen_learner(found["id"])
+            return send(chat_id, t, r)
+
     if not s:
         code = re.sub(r"[^A-Za-z0-9]", "", text).upper()[:6]
         found = access = None
