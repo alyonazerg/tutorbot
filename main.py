@@ -44,7 +44,7 @@ CURRENCY = "₽"
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 WD_CAP = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 RATE_PRESETS = [(2000, 60), (1500, 45)]
-BOT_NAME = "Словник"  # как бот называет себя в текстах
+BOT_NAME = "What's next?"  # как бот называет себя в текстах
 PAY_DETAILS = "+7 913 391-77-45 — ВТБ (Алёна П.)"
 CANCEL_REASONS = ["по просьбе ученика", "по моей просьбе", "болезнь", "другое"]
 KEY_MIN_REVIEWS = 5  # сколько повторений за день нужно для ключика
@@ -84,6 +84,7 @@ HELP = (
     "/s Аня — открыть карточку\n"
     "/done — занятие сегодня, /done 15.09 — датой\n"
     "/pay 4 4000 — оплата: 4 занятия, 4000\n"
+    "/today — занятия на сегодня со ссылками\n"
     "/week — расписание на неделю\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
@@ -708,6 +709,17 @@ def send_file(chat_id, file_id, caption=""):
     return tg("sendDocument", chat_id=chat_id, document=file_id, caption=caption[:200])
 
 
+def zoom_link(s):
+    z = (s["zoom"] or "").strip()
+    return z if z.startswith("http") else ""
+
+
+def zoom_rows(s):
+    """Кнопка подключения — у каждого ученика своя ссылка."""
+    z = zoom_link(s)
+    return [[("🎥 Подключиться к занятию", z)]] if z else []
+
+
 def announce_material(sid, title, url, for_all=False):
     """Сообщает ученику (или всем, если материал общий), что появился материал."""
     rows = [[("🌐 Открыть", url)]] if url.startswith("http") else None
@@ -853,7 +865,9 @@ def screen_student(sid):
     total = word_count(sid)
     if total:
         lines.append("Словарь: {} слов, на сегодня {}".format(total, due_count(sid)))
-    if s["zoom"]:
+    if zoom_link(s):
+        lines.append('🎥 <a href="{}">Ссылка на занятие</a>'.format(esc(zoom_link(s))))
+    elif s["zoom"]:
         lines.append("Zoom: {}".format(esc(s["zoom"])))
     hw = current_hw(sid)
     if hw:
@@ -1166,6 +1180,36 @@ def screen_month(chat_id):
     return text, [[("⬅️ К ученикам", "menu")]]
 
 
+def text_day(chat_id):
+    """Сегодняшние занятия. Имя ученика — скрытая ссылка на его Zoom."""
+    items = []
+    for s in students(chat_id):
+        st = stats(s["id"])
+        for d, t, k in occurrences(s["id"], 3):
+            if d != today():
+                break
+            items.append((t or "--:--", s, st, k))
+    if not items:
+        return ""
+    items.sort(key=lambda x: x[0])
+    lines = ["☀️ <b>Сегодня занятия</b> — {}".format(fmt_date(today(), True)), ""]
+    has_zoom = False
+    for t, s, st, k in items:
+        z = zoom_link(s)
+        if z:
+            has_zoom = True
+            who = '<a href="{}">{}</a>'.format(esc(z), esc(s["name"]))
+        else:
+            who = "<b>{}</b>".format(esc(s["name"]))
+        marks = [x for x in (KIND_WORD.get(k, "").strip(),
+                             "оплата!" if st["left"] <= 0 else "") if x]
+        lines.append("🕐 <b>{}</b> — {}{}".format(
+            t, who, " · " + " · ".join(marks) if marks else ""))
+    if has_zoom:
+        lines += ["", "<i>Имя ученика — ссылка на его занятие.</i>"]
+    return "\n".join(lines)
+
+
 def screen_week(chat_id):
     plan = {}
     for s in students(chat_id):
@@ -1434,7 +1478,10 @@ def text_next_lesson(sid):
                                          KIND_WORD.get(k, "")).rstrip())
     else:
         lines.append("Дата пока не назначена.")
-    if s["zoom"]:
+    z = zoom_link(s)
+    if z:
+        lines.append('🎥 <a href="{}">Подключиться к занятию</a>'.format(esc(z)))
+    elif s["zoom"]:
         lines.append("🎥 Zoom: {}".format(esc(s["zoom"])))
     hw = current_hw(sid)
     if hw:
@@ -1490,7 +1537,8 @@ def screen_learner(sid):
         lines = ["👋 <b>{}</b>".format(esc(s["name"])), "",
                  "📚 Слов в словаре: <b>{}</b>".format(total),
                  "На повторение сегодня: <b>{}</b>".format(due)]
-        rows = [[("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
+        rows = zoom_rows(s) + [
+                [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
                  ("📖 Мои слова", "lw:%d" % sid)],
                 [("📈 Мой прогресс", "lrn_prog:%d" % sid),
@@ -1519,7 +1567,7 @@ def screen_learner(sid):
     lines += ["", "📚 Словарь: {} слов, на сегодня {}".format(total, due)]
     if s["keys"]:
         lines.append("🔑 Ключиков: {} — можно открыть бонусный материал".format(s["keys"]))
-    rows = [[("📅 Ближайшее занятие", "lrn_next:%d" % sid)]]
+    rows = zoom_rows(s) + [[("📅 Ближайшее занятие", "lrn_next:%d" % sid)]]
     if s["keys"]:
         rows.append([("🔑 Открыть бонус ({})".format(s["keys"]), "lrn_key:%d" % sid)])
     rows += [
@@ -1661,7 +1709,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         if cmd == "lrn_next":
             toast(cq_id)
             return edit(chat_id, message_id, text_next_lesson(sid),
-                        [[("⬅️ Назад", "lrn:%d" % sid)]])
+                        zoom_rows(sget(sid)) + [[("⬅️ Назад", "lrn:%d" % sid)]])
         if cmd == "lrn_mat":
             toast(cq_id)
             items = [m for m in materials_of(sid) if m["kind"] != "bonus"]
@@ -2333,10 +2381,28 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send(chat_id, t, r)
 
     if action == "zoom":
-        val = None if text.strip() in ("-", "—") else text.strip()[:200]
+        raw = text.strip()
+        if raw in ("-", "—"):
+            val = None
+        else:
+            m = re.search(r"(https?://\S+)", raw)
+            if m:
+                val = m.group(1)[:300]
+            else:
+                val = next((e["url"] for e in (entities or [])
+                            if e.get("type") == "text_link" and e.get("url")), None)
+                if not val:
+                    return send(chat_id, "Нужна ссылка, начинающаяся с <code>https://</code>. "
+                                         "Чтобы убрать ссылку, пришлите <code>-</code>.")
+                val = val[:300]
         run("UPDATE students SET zoom=? WHERE id=?", (val, sid))
         set_state(chat_id, pending=None)
-        flash(chat_id, "✅ Ссылка на Zoom {}.".format("сохранена" if val else "убрана"))
+        if val:
+            flash(chat_id, "✅ Ссылка сохранена:\n{}".format(esc(val)))
+            notify_student(sid, "🎥 Ссылка на ваши занятия обновлена — она всегда "
+                                "есть в меню бота.", [[("🎥 Подключиться", val)]])
+        else:
+            flash(chat_id, "✅ Ссылка убрана.")
         t, r = screen_student(sid)
         return send(chat_id, t, r)
 
@@ -2573,6 +2639,11 @@ def handle_command(chat_id, user_id, text):
         t, r = screen_month(chat_id)
         return send(chat_id, t, r)
 
+    if cmd in ("today", "сегодня", "день"):
+        body = text_day(chat_id)
+        return send(chat_id, body or "☀️ На сегодня занятий нет.",
+                    [[("🗓 Ближайшая неделя", "week")], [("⬅️ К ученикам", "menu")]])
+
     if cmd in ("week", "неделя"):
         t, r = screen_week(chat_id)
         return send(chat_id, t, r)
@@ -2764,18 +2835,9 @@ def daily_digest():
 
     for row in q("SELECT DISTINCT chat_id FROM students"):
         chat_id = row["chat_id"]
-        items = []
-        for s in students(chat_id):
-            st = stats(s["id"])
-            for d, t, k in occurrences(s["id"], 3):
-                if d != today():
-                    break
-                items.append(" {:<6}{:<12}{}".format(
-                    t or "--:--", s["name"][:12],
-                    KIND_WORD.get(k, "").strip() + " " +
-                    ("оплата!" if st["left"] <= 0 else "")))
-        if items:
-            send(chat_id, "☀️ <b>Сегодня занятия</b>\n" + pre("\n".join(items)))
+        body = text_day(chat_id)
+        if body:
+            send(chat_id, body)
 
     for s in q("SELECT * FROM students WHERE tg_user_id IS NOT NULL AND archived=0"):
         n = due_count(s["id"])
@@ -3007,6 +3069,7 @@ def main():
                            esc(os.path.abspath(DB_PATH))))
     tg("setMyCommands", commands=[
         {"command": "students", "description": "Ученики"},
+        {"command": "today", "description": "Занятия сегодня"},
         {"command": "week", "description": "Ближайшая неделя"},
         {"command": "schedule", "description": "Моё расписание"},
         {"command": "month", "description": "Итоги месяца"},
