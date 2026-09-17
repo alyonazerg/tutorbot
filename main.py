@@ -1190,11 +1190,13 @@ def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
                    "messages": [{"role": "user", "content": prompt}]}
         headers = {"x-api-key": AI_KEY, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
+        if "api.anthropic.com" not in AI_URL:
+            headers["Authorization"] = "Bearer " + AI_KEY
     else:
         payload = {"model": AI_MODEL, "max_tokens": max_tokens,
                    "messages": [{"role": "user", "content": prompt}]}
         headers = {"Authorization": "Bearer " + AI_KEY,
-                   "Content-Type": "application/json"}
+                   "Content-Type": "application/json", "x-api-key": AI_KEY}
     req = urllib.request.Request(AI_URL, data=json.dumps(payload).encode("utf-8"),
                                  method="POST")
     for k, v in headers.items():
@@ -1548,6 +1550,17 @@ def ai_selftest():
     hint = ""
     err = AI_LAST["error"] or "нет ответа"
     low = err.lower()
+    anthropic_url = "api.anthropic.com" in AI_URL
+    if not AI_KEY.startswith("sk-ant-") and anthropic_url:
+        return ("⚠️ Ключ и адрес не совпадают.\n\nКлюч начинается не с "
+                "<code>sk-ant-</code>, значит он выдан сервисом-посредником, а запросы "
+                "уходят напрямую в Anthropic — там такой ключ не знают.\n\n"
+                "В настройках посредника найдите Base URL и укажите:\n"
+                "• <code>AI_URL</code> — их адрес\n"
+                "• <code>AI_FORMAT</code> — <code>openai</code>, если у них Chat "
+                "Completions, или <code>anthropic</code>, если Messages\n"
+                "• <code>AI_MODEL</code> — название модели так, как оно написано у них\n\n"
+                "Ошибка сервиса: <code>{}</code>".format(esc(err)))
     if "not_found" in low or "404" in low or "model" in low:
         hint = ("\n\n<i>Похоже, дело в названии модели. Проверьте AI_MODEL — "
                 "рабочие варианты: claude-haiku-4-5-20251001, claude-sonnet-5.</i>")
