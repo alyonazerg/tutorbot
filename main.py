@@ -72,7 +72,7 @@ HELP = (
 
 # --------------------------------------------------------------------------- API
 
-def tg(method, **params):
+def _tg_json(method, params):
     data = json.dumps(params, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(API + method, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -80,10 +80,47 @@ def tg(method, **params):
         with urllib.request.urlopen(req, timeout=70) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        print("HTTP", e.code, e.read().decode("utf-8", "replace")[:400])
+        body = e.read().decode("utf-8", "replace")[:400]
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"ok": False, "description": "HTTP {} {}".format(e.code, body)}
     except Exception as e:
-        print("API error:", e)
-    return {}
+        return {"ok": False, "description": "{}: {}".format(type(e).__name__, e)}
+
+
+def _tg_form(method, params):
+    """Запасной путь: обычная форма вместо JSON — на случай капризов прокси хостинга."""
+    flat = {}
+    for k, v in params.items():
+        if v is None:
+            continue
+        flat[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+    data = urllib.parse.urlencode(flat).encode("utf-8")
+    req = urllib.request.Request(API + method, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=70) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:400]
+        try:
+            return json.loads(body)
+        except Exception:
+            return {"ok": False, "description": "HTTP {} {}".format(e.code, body)}
+    except Exception as e:
+        return {"ok": False, "description": "{}: {}".format(type(e).__name__, e)}
+
+
+def tg(method, **params):
+    res = _tg_json(method, params)
+    if res.get("ok"):
+        return res
+    res2 = _tg_form(method, params)
+    if not res2.get("ok"):
+        print("TG FAIL", method, "| json:", res.get("description"),
+              "| form:", res2.get("description"))
+    return res2 if (res2.get("ok") or res2.get("description")) else res
 
 
 def send_document(chat_id, filename, content, caption=""):
@@ -150,6 +187,26 @@ def edit(chat_id, message_id, text, rows=None):
     return res
 
 
+def delete_message(chat_id, message_id):
+    if message_id:
+        tg("deleteMessage", chat_id=chat_id, message_id=message_id)
+
+
+def flash(chat_id, text, rows=None):
+    """Служебное сообщение: предыдущее такое же удаляется, чтобы чат не зарастал."""
+    key = "flash:%s" % chat_id
+    old = meta_get(key)
+    if old:
+        try:
+            delete_message(chat_id, int(old))
+        except Exception:
+            pass
+    res = send(chat_id, text, rows)
+    mid = (res.get("result") or {}).get("message_id")
+    meta_set(key, mid or "")
+    return res
+
+
 def toast(cq_id, text=""):
     tg("answerCallbackQuery", callback_query_id=cq_id, text=text[:190])
 
@@ -205,6 +262,7 @@ MIGRATIONS = [
     ("students", "access", "TEXT DEFAULT 'full'"),
     ("students", "nick", "TEXT"),
     ("words", "seen", "TEXT"),
+    ("students", "is_self", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -261,12 +319,42 @@ def set_state(chat_id, student_id=..., pending=...):
 
 
 def students(chat_id, archived=False):
-    return q("SELECT * FROM students WHERE chat_id=? AND archived=? ORDER BY name",
+    return q("SELECT * FROM students WHERE chat_id=? AND archived=? "
+             "AND COALESCE(is_self,0)=0 ORDER BY name",
              (chat_id, 1 if archived else 0))
+
+
+def self_student(chat_id, user_id=None):
+    """Карточка самого преподавателя — чтобы учить слова и быть в рейтинге."""
+    row = q("SELECT * FROM students WHERE chat_id=? AND is_self=1", (chat_id,), one=True)
+    if row:
+        return row
+    sid = run("INSERT INTO students (chat_id, name, nick, is_self, tg_user_id, access) "
+              "VALUES (?,?,?,1,?,'full')",
+              (chat_id, "Я", "Я", user_id or chat_id))
+    return student(sid)
+
+
+def learners(chat_id):
+    rows = list(students(chat_id))
+    me = q("SELECT * FROM students WHERE chat_id=? AND is_self=1", (chat_id,), one=True)
+    if me:
+        rows.append(me)
+    return rows
+
+
+BLANK_STUDENT = {"id": 0, "chat_id": None, "name": "—", "rate": 0, "duration": 60,
+                 "archived": 0, "tg_user_id": None, "code": None, "code_kid": None,
+                 "access": "full", "nick": None}
 
 
 def student(sid):
     return q("SELECT * FROM students WHERE id=?", (sid,), one=True)
+
+
+def sget(sid):
+    """Как student(), но никогда не возвращает None — бот не падает на старых кнопках."""
+    return student(sid) or dict(BLANK_STUDENT)
 
 
 def student_by_user(user_id):
@@ -274,7 +362,7 @@ def student_by_user(user_id):
 
 
 def owner_chat(sid):
-    s = student(sid)
+    s = sget(sid)
     return s["chat_id"] if s else None
 
 
@@ -489,7 +577,7 @@ def nick_of(s):
 
 def leaderboard(chat_id, me_sid=None, real_names=False):
     rows = []
-    for s in students(chat_id):
+    for s in learners(chat_id):
         p = progress(s["id"])
         if not p["total"]:
             continue
@@ -546,7 +634,8 @@ def screen_students(chat_id):
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
     rows.append([("🗓 Неделя", "week"), ("📅 Расписание", "sched_all")])
-    rows.append([("🏆 Рейтинг", "board"), ("💌 Визитка", "promo_me")])
+    rows.append([("📚 Мой словарь", "myw"), ("🏆 Рейтинг", "board")])
+    rows.append([("💌 Визитка", "promo_me")])
     rows.append([("🗄 Архив", "arch_list"), ("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
@@ -556,7 +645,7 @@ def screen_students(chat_id):
 
 
 def screen_student(sid):
-    s = student(sid)
+    s = sget(sid)
     st = stats(sid)
     last = q("SELECT * FROM lessons WHERE student_id=? ORDER BY held_on DESC, id DESC LIMIT 1",
              (sid,), one=True)
@@ -614,7 +703,7 @@ def screen_student(sid):
 
 
 def screen_pay(sid):
-    s = student(sid)
+    s = sget(sid)
     rate = s["rate"] or 0
 
     def label(n):
@@ -639,7 +728,7 @@ def screen_move(sid):
 
 
 def screen_sched(sid):
-    s = student(sid)
+    s = sget(sid)
     cur = slots_text(sid)
     ap = q("SELECT * FROM appts WHERE student_id=? AND on_date>=? ORDER BY on_date, at",
            (sid, today().isoformat()))
@@ -674,7 +763,7 @@ def screen_wpick(sid, learner=False):
 
 
 def screen_history(sid):
-    s = student(sid)
+    s = sget(sid)
     ls = q("SELECT * FROM lessons WHERE student_id=? ORDER BY held_on DESC, id DESC LIMIT 15", (sid,))
     ps = q("SELECT * FROM payments WHERE student_id=? ORDER BY id DESC LIMIT 10", (sid,))
     mv = q("SELECT * FROM moves WHERE student_id=? AND to_date>=? ORDER BY to_date",
@@ -775,7 +864,7 @@ def screen_archive(chat_id):
 
 
 def screen_words(sid):
-    s = student(sid)
+    s = sget(sid)
     total, due = word_count(sid), due_count(sid)
     ws = q("SELECT * FROM words WHERE student_id=? ORDER BY id DESC LIMIT 12", (sid,))
     lines = ["📚 <b>Словарь — {}</b>".format(esc(s["name"])), "",
@@ -796,7 +885,7 @@ def screen_words(sid):
 
 
 def text_progress(sid, own=False):
-    s = student(sid)
+    s = sget(sid)
     p = progress(sid)
     who = "📈 <b>Мой прогресс</b>" if own else "📈 <b>Прогресс — {}</b>".format(esc(s["name"]))
     body = [
@@ -858,7 +947,7 @@ def screen_share(sid):
 # --------------------------------------------------------- Тексты для пересылки
 
 def text_statement(sid):
-    s = student(sid)
+    s = sget(sid)
     st = stats(sid)
     ls = q("SELECT * FROM lessons WHERE student_id=? ORDER BY held_on DESC, id DESC LIMIT 5", (sid,))
     lines = ["📄 <b>{}</b> — занятия на {}".format(esc(s["name"]), fmt_date(today())), ""]
@@ -880,7 +969,7 @@ def text_statement(sid):
 
 
 def text_reminder(sid):
-    s = student(sid)
+    s = sget(sid)
     st = stats(sid)
     rate, dur = s["rate"] or 0, s["duration"] or 60
     if st["left"] > 1:
@@ -902,7 +991,7 @@ def text_reminder(sid):
 
 
 def text_schedule(sid):
-    s = student(sid)
+    s = sget(sid)
     occ = occurrences(sid, max(stats(sid)["left"], 4))
     if not occ:
         return "Расписание для {} пока не задано.".format(esc(s["name"]))
@@ -913,7 +1002,7 @@ def text_schedule(sid):
 
 
 def text_invite(sid, kind="full"):
-    s = student(sid)
+    s = sget(sid)
     col = "code" if kind == "full" else "code_kid"
     code = s[col]
     if not code:
@@ -936,7 +1025,7 @@ def text_invite(sid, kind="full"):
 
 
 def text_when(sid):
-    s = student(sid)
+    s = sget(sid)
     occ = occurrences(sid, 8)
     if not occ:
         return ("🗓 Ближайшие занятия пока не назначены.\n"
@@ -950,7 +1039,20 @@ def text_when(sid):
 # ----------------------------------------------------------------- Экраны ученика
 
 def screen_learner(sid):
-    s = student(sid)
+    s = sget(sid)
+    if s["is_self"]:
+        total, due = word_count(sid), due_count(sid)
+        p = progress(sid)
+        lines = ["📚 <b>Мой словарь</b>", "",
+                 "Слов: <b>{}</b> · выучено: <b>{}</b> ({}%)".format(total, p["learned"], p["pct"]),
+                 "На повторение сегодня: <b>{}</b>".format(due),
+                 "Дней подряд: <b>{}</b>".format(p["streak"])]
+        rows = [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
+                [("➕ Добавить слова", "lrn_add:%d" % sid),
+                 ("📖 Мои слова", "lw:%d" % sid)],
+                [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+                [("⬅️ К ученикам", "menu")]]
+        return "\n".join(lines), rows
     if (s["access"] or "full") == "kid":
         total, due = word_count(sid), due_count(sid)
         lines = ["👋 <b>{}</b>".format(esc(s["name"])), "",
@@ -1038,11 +1140,11 @@ def export_csv(chat_id):
 def record_lesson(chat_id, sid, d, kind="held", charged=1):
     lid = run("INSERT INTO lessons (student_id, held_on, kind, charged) VALUES (?,?,?,?)",
               (sid, d.isoformat(), kind, charged))
-    s = student(sid)
+    s = sget(sid)
     st = stats(sid)
     what = "Занятие" if kind == "held" else (
         "Отмена со списанием" if charged else "Отмена без списания")
-    send(chat_id, "✅ {} — <b>{}</b>, {}.\nОстаток: <b>{}</b> {}.".format(
+    flash(chat_id, "✅ {} — <b>{}</b>, {}.\nОстаток: <b>{}</b> {}.".format(
         what, esc(s["name"]), fmt_date(d), st["left"], plural(st["left"])))
     if st["left"] == 1:
         send(chat_id, "🔔 У <b>{}</b> остался последний оплаченный урок — пора напомнить "
@@ -1116,14 +1218,14 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_prog":
             toast(cq_id)
-            s_ = student(sid)
+            s_ = sget(sid)
             return edit(chat_id, message_id, text_progress(sid, own=True),
                         [[("🏆 Рейтинг", "lrn_board:%d" % sid)],
                          [("✏️ Ник для рейтинга: {}".format(nick_of(s_)), "lrn_nick:%d" % sid)],
                          [("⬅️ Назад", "lrn:%d" % sid)]])
         if cmd == "lrn_board":
             toast(cq_id)
-            s_ = student(sid)
+            s_ = sget(sid)
             t, r = screen_board(s_["chat_id"], me_sid=sid, real_names=False)
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_nick":
@@ -1240,7 +1342,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         last = q("SELECT * FROM lessons WHERE student_id=? ORDER BY id DESC LIMIT 1", (sid,), one=True)
         if last:
             run("DELETE FROM lessons WHERE id=?", (last["id"],))
-            send(chat_id, "↩️ Запись от {} удалена. Остаток: <b>{}</b>.".format(
+            flash(chat_id, "↩️ Запись от {} удалена. Остаток: <b>{}</b>.".format(
                 fmt_date(last["held_on"]), stats(sid)["left"]))
         else:
             send(chat_id, "Записей нет.")
@@ -1250,7 +1352,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         last = q("SELECT * FROM payments WHERE student_id=? ORDER BY id DESC LIMIT 1", (sid,), one=True)
         if last:
             run("DELETE FROM payments WHERE id=?", (last["id"],))
-            send(chat_id, "↩️ Оплата {} удалена. Остаток: <b>{}</b>.".format(
+            flash(chat_id, "↩️ Оплата {} удалена. Остаток: <b>{}</b>.".format(
                 fmt_money(last["amount"]), stats(sid)["left"]))
         else:
             send(chat_id, "Оплат нет.")
@@ -1261,11 +1363,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "payn":
         n = int(parts[2])
-        s = student(sid)
+        s = sget(sid)
         if s["rate"]:
             run("INSERT INTO payments (student_id, lessons, amount, paid_on) VALUES (?,?,?,?)",
                 (sid, n, n * s["rate"], today().isoformat()))
-            send(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
+            flash(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
                 esc(s["name"]), n, plural(n), fmt_money(n * s["rate"]), fmt_date(today()),
                 stats(sid)["left"]))
             return show(screen_student, sid)
@@ -1303,11 +1405,17 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         n = len(q("SELECT id FROM appts WHERE student_id=? AND on_date>=?",
                   (sid, today().isoformat())))
         run("DELETE FROM appts WHERE student_id=? AND on_date>=?", (sid, today().isoformat()))
-        send(chat_id, "🧹 Убрано разовых дат: <b>{}</b>.".format(n))
+        flash(chat_id, "🧹 Убрано разовых дат: <b>{}</b>.".format(n))
         return show(screen_sched, sid)
 
     if cmd == "hist":
         return show(screen_history, sid)
+
+    if cmd == "myw":
+        me = self_student(chat_id, user_id)
+        set_state(chat_id, pending=None)
+        t, r = screen_learner(me["id"])
+        return edit(chat_id, message_id, t, r)
 
     if cmd == "prog":
         return show(screen_progress, sid)
@@ -1339,7 +1447,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
         if w:
             run("DELETE FROM words WHERE id=?", (w["id"],))
-            send(chat_id, "🗑 Слово удалено: <b>{}</b> — {}.".format(
+            flash(chat_id, "🗑 Слово удалено: <b>{}</b> — {}.".format(
                 esc(w["term"]), esc(w["translation"])))
         return show(screen_wpick, sid)
 
@@ -1366,7 +1474,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id, text + tail, r)
 
     if cmd == "more":
-        s = student(sid)
+        s = sget(sid)
         rows = [[("💵 Ставка за занятие", "rate:%d" % sid)],
                 [("🔗 Код: взрослый", "code:%d" % sid),
                  ("🔗 Код: ребёнок", "codek:%d" % sid)],
@@ -1388,8 +1496,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "rateset":
         run("UPDATE students SET rate=?, duration=? WHERE id=?",
             (float(parts[2]), int(parts[3]), sid))
-        send(chat_id, "✅ Ставка для <b>{}</b>: {} / {} мин.".format(
-            esc(student(sid)["name"]), fmt_money(float(parts[2])), parts[3]))
+        flash(chat_id, "✅ Ставка для <b>{}</b>: {} / {} мин.".format(
+            esc(sget(sid)["name"]), fmt_money(float(parts[2])), parts[3]))
         return show(screen_student, sid)
 
     if cmd == "ratec":
@@ -1404,14 +1512,14 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id, "Новое имя ученика?", [[("⬅️ Назад", "st:%d" % sid)]])
 
     if cmd == "arch":
-        name = student(sid)["name"]
+        name = sget(sid)["name"]
         run("UPDATE students SET archived=1 WHERE id=?", (sid,))
         send(chat_id, "🗄 <b>{}</b> в архиве, данные сохранены.".format(esc(name)))
         return show(screen_students, chat_id)
 
     if cmd == "unarch":
         run("UPDATE students SET archived=0 WHERE id=?", (sid,))
-        send(chat_id, "✅ <b>{}</b> снова в списке.".format(esc(student(sid)["name"])))
+        flash(chat_id, "✅ <b>{}</b> снова в списке.".format(esc(sget(sid)["name"])))
         return show(screen_student, sid)
 
 
@@ -1432,12 +1540,12 @@ def handle_pending(chat_id, pending, text, user_id=None):
                                  "по одному слову в строке.")
         n = add_words(sid, pairs, pending.get("by", "педагог"))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.".format(n))
+        flash(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.".format(n))
         if pending.get("by") == "ученик":
             owner = owner_chat(sid)
             if owner:
                 send(owner, "📚 <b>{}</b> добавил(а) {} новых слов в словарь.".format(
-                    esc(student(sid)["name"]), n))
+                    esc(sget(sid)["name"]), n))
             t, r = screen_learner(sid)
         else:
             t, r = screen_words(sid)
@@ -1449,7 +1557,7 @@ def handle_pending(chat_id, pending, text, user_id=None):
             return send(chat_id, "Ник не может быть пустым.")
         run("UPDATE students SET nick=? WHERE id=?", (nick, sid))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Ник в рейтинге: <b>{}</b>".format(esc(nick)))
+        flash(chat_id, "✅ Ник в рейтинге: <b>{}</b>".format(esc(nick)))
         t, r = screen_learner(sid)
         return send(chat_id, t, r)
 
@@ -1457,16 +1565,16 @@ def handle_pending(chat_id, pending, text, user_id=None):
         name = text.strip()[:60]
         new_id = run("INSERT INTO students (chat_id, name) VALUES (?,?)", (chat_id, name))
         set_state(chat_id, student_id=new_id, pending=None)
-        send(chat_id, "✅ Ученик <b>{}</b> добавлен.".format(esc(name)))
+        flash(chat_id, "✅ Ученик <b>{}</b> добавлен.".format(esc(name)))
         t, r = screen_student(new_id)
         return send(chat_id, t, r)
 
     if action == "rename":
-        old = student(sid)["name"]
+        old = sget(sid)["name"]
         new = text.strip()[:60]
         run("UPDATE students SET name=? WHERE id=?", (new, sid))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ {} → <b>{}</b>.".format(esc(old), esc(new)))
+        flash(chat_id, "✅ {} → <b>{}</b>.".format(esc(old), esc(new)))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
 
@@ -1475,17 +1583,17 @@ def handle_pending(chat_id, pending, text, user_id=None):
         if not nums:
             return send(chat_id, "Нужно число, например 1800 или «1800 50».")
         rate = float(nums[0])
-        dur = int(nums[1]) if len(nums) > 1 else (student(sid)["duration"] or 60)
+        dur = int(nums[1]) if len(nums) > 1 else (sget(sid)["duration"] or 60)
         run("UPDATE students SET rate=?, duration=? WHERE id=?", (rate, dur, sid))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Ставка: {} / {} мин.".format(fmt_money(rate), dur))
+        flash(chat_id, "✅ Ставка: {} / {} мин.".format(fmt_money(rate), dur))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
 
     if action == "note":
         run("UPDATE lessons SET note=? WHERE id=?", (text.strip()[:200], pending["lid"]))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Тема записана: {}".format(esc(text.strip()[:200])))
+        flash(chat_id, "✅ Тема записана: {}".format(esc(text.strip()[:200])))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
 
@@ -1494,12 +1602,12 @@ def handle_pending(chat_id, pending, text, user_id=None):
         if not m:
             return send(chat_id, "Нужно число занятий, например 6.")
         n = int(m.group())
-        s = student(sid)
+        s = sget(sid)
         if s["rate"]:
             run("INSERT INTO payments (student_id, lessons, amount, paid_on) VALUES (?,?,?,?)",
                 (sid, n, n * s["rate"], today().isoformat()))
             set_state(chat_id, pending=None)
-            send(chat_id, "✅ Оплата: {} {} · {}. Остаток: <b>{}</b>.".format(
+            flash(chat_id, "✅ Оплата: {} {} · {}. Остаток: <b>{}</b>.".format(
                 n, plural(n), fmt_money(n * s["rate"]), stats(sid)["left"]))
             t, r = screen_student(sid)
             return send(chat_id, t, r)
@@ -1522,8 +1630,8 @@ def handle_pending(chat_id, pending, text, user_id=None):
         run("INSERT INTO payments (student_id, lessons, amount, paid_on) VALUES (?,?,?,?)",
             (sid, n, amount, d.isoformat()))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
-            esc(student(sid)["name"]), n, plural(n), fmt_money(amount), fmt_date(d),
+        flash(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
+            esc(sget(sid)["name"]), n, plural(n), fmt_money(amount), fmt_date(d),
             stats(sid)["left"]))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
@@ -1545,7 +1653,7 @@ def handle_pending(chat_id, pending, text, user_id=None):
         run("INSERT INTO moves (student_id, from_date, to_date, at) VALUES (?,?,?,?)",
             (sid, pending["from"], d.isoformat(), at or ""))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Перенос: {} → <b>{} {}</b>.".format(
+        flash(chat_id, "✅ Перенос: {} → <b>{} {}</b>.".format(
             fmt_date(pending["from"]), fmt_date(d), at or ""))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
@@ -1559,7 +1667,7 @@ def handle_pending(chat_id, pending, text, user_id=None):
             run("INSERT INTO appts (student_id, on_date, at) VALUES (?,?,?)",
                 (sid, d.isoformat(), at))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Добавлены даты: {}".format(
+        flash(chat_id, "✅ Добавлены даты: {}".format(
             ", ".join("{} {}".format(fmt_date(d, True), at).strip() for d, at in dates)))
         t, r = screen_sched(sid)
         return send(chat_id, t, r)
@@ -1573,7 +1681,7 @@ def handle_pending(chat_id, pending, text, user_id=None):
             for wd, at in slots:
                 run("INSERT INTO slots (student_id, weekday, at) VALUES (?,?,?)", (sid, wd, at))
         set_state(chat_id, pending=None)
-        send(chat_id, "✅ Расписание: {}".format(slots_text(sid) or "очищено"))
+        flash(chat_id, "✅ Расписание: {}".format(slots_text(sid) or "очищено"))
         t, r = screen_student(sid)
         return send(chat_id, t, r)
 
@@ -1651,6 +1759,11 @@ def handle_command(chat_id, user_id, text):
     if cmd == "export":
         return export_csv(chat_id)
 
+    if cmd in ("mywords", "словарь", "слова"):
+        me = self_student(chat_id, user_id)
+        t, r = screen_learner(me["id"])
+        return send(chat_id, t, r)
+
     sid = st["student_id"]
     if cmd in ("done", "занятие") and sid:
         d = parse_date(arg) if arg else today()
@@ -1696,7 +1809,7 @@ def learner_flow(chat_id, user_id, text):
             return send(chat_id, t + hint, r)
         run("UPDATE students SET tg_user_id=?, access=? WHERE id=?",
             (user_id, access, found["id"]))
-        send(chat_id, "✅ Готово, вы подключены.")
+        flash(chat_id, "✅ Готово, вы подключены.")
         if found["chat_id"]:
             send(found["chat_id"], "🔗 <b>{}</b> подключился(ась) к боту.".format(esc(found["name"])))
         s = student(found["id"])
@@ -1783,6 +1896,27 @@ def handle(update):
         return handle_callback(chat_id, msg["message_id"], cq["id"], cq.get("data") or "", user_id)
 
 
+def report_error(update=None):
+    """Присылает владельцу короткий отчёт об ошибке, чтобы не искать в логах."""
+    if not OWNER_ID:
+        return
+    tb = traceback.format_exc().strip().splitlines()
+    where = [l.strip() for l in tb if l.strip().startswith("File \"")][-1:] or ["—"]
+    what = tb[-1] if tb else "—"
+    hint = ""
+    if isinstance(update, dict):
+        cq = update.get("callback_query") or {}
+        if cq:
+            hint = "\nКнопка: <code>{}</code>".format(esc(cq.get("data", "")))
+        else:
+            txt = ((update.get("message") or {}).get("text") or "")[:60]
+            if txt:
+                hint = "\nСообщение: <code>{}</code>".format(esc(txt))
+    tg("sendMessage", chat_id=OWNER_ID, parse_mode="HTML",
+       text="⚠️ <b>Ошибка в боте</b>\n<code>{}</code>\n<code>{}</code>{}".format(
+           esc(what[:250]), esc(where[0][:250]), hint))
+
+
 def main():
     if not TOKEN:
         raise SystemExit("Задайте токен: export TG_BOT_TOKEN='...'")
@@ -1800,6 +1934,7 @@ def main():
         {"command": "schedule", "description": "Моё расписание"},
         {"command": "month", "description": "Итоги месяца"},
         {"command": "export", "description": "Выгрузка CSV"},
+        {"command": "mywords", "description": "Мой словарь"},
         {"command": "db", "description": "Где лежит база"},
         {"command": "help", "description": "Справка"},
     ])
@@ -1813,6 +1948,7 @@ def main():
                 handle(u)
             except Exception:
                 traceback.print_exc()
+                report_error(u)
         try:
             daily_digest()
         except Exception:
