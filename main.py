@@ -10,6 +10,7 @@ Telegram-бот для репетитора: ученики, оплаты, за�
     TG_BOT_DB       — путь к файлу базы, например /data/tutor.db
     TG_DIGEST_HOUR  — час утренних напоминаний, по умолчанию 9, 0 — выключить
     TG_BACKUP_HOUR  — час ежедневной копии базы в личку, по умолчанию 22, 0 — выключить
+    TG_PET_HOUR     — час напоминания про питомца, по умолчанию 18, 0 — выключить
 
 Резервные копии: /backup — прислать файл базы прямо сейчас, /restore — восстановить
 (после команды пришлите боту .db-файл). Раз в сутки копия приходит сама.
@@ -48,6 +49,11 @@ BOT_NAME = "What's next?"  # как бот называет себя в текс
 PAY_DETAILS = "+7 913 391-77-45 — ВТБ (Алёна П.)"
 CANCEL_REASONS = ["по просьбе ученика", "по моей просьбе", "болезнь", "другое"]
 KEY_MIN_REVIEWS = 5  # сколько повторений за день нужно для ключика
+PET_GOAL = 5         # сколько повторений за день «кормят» питомца
+PET_REMIND_HOUR = int(os.environ.get("TG_PET_HOUR", "18") or 0)  # 0 — без напоминаний
+# Стадии: сколько всего повторений нужно, значок, название
+PET_STAGES = [(0, "🥚", "Яйцо"), (30, "🐣", "Птенец"), (120, "🐥", "Цыплёнок"),
+              (300, "🦜", "Попугай"), (700, "🦉", "Мудрая сова")]
 
 # --- ИИ для warm-up (необязательно) ---
 # AI_FORMAT: "anthropic" для api.anthropic.com, "openai" для любого
@@ -341,6 +347,7 @@ MIGRATIONS = [
     ("students", "is_self", "INTEGER DEFAULT 0"),
     ("students", "is_guest", "INTEGER DEFAULT 0"),
     ("students", "zoom", "TEXT"),
+    ("students", "pet_name", "TEXT"),
     ("students", "keys", "INTEGER DEFAULT 0"),
     ("lessons", "reason", "TEXT"),
     ("payments", "receipt", "TEXT"),
@@ -1507,6 +1514,112 @@ def text_next_lesson(sid):
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------- Питомец
+
+def pet(sid):
+    """Состояние питомца. Ничего не хранится, кроме имени: всё считается из повторов."""
+    s = sget(sid)
+    total = q("SELECT COUNT(*) c FROM reviews WHERE student_id=?", (sid,), one=True)["c"]
+    done = q("SELECT COUNT(*) c FROM reviews WHERE student_id=? AND on_date=?",
+             (sid, today().isoformat()), one=True)["c"]
+    stage = 0
+    for i, (need, _, _) in enumerate(PET_STAGES):
+        if total >= need:
+            stage = i
+    need_next, emoji, title = PET_STAGES[stage][0], PET_STAGES[stage][1], PET_STAGES[stage][2]
+    to_next = PET_STAGES[stage + 1][0] - total if stage + 1 < len(PET_STAGES) else 0
+    last = q("SELECT MAX(on_date) d FROM reviews WHERE student_id=?", (sid,), one=True)["d"]
+    gap = None
+    if last:
+        gap = (today() - datetime.strptime(last, "%Y-%m-%d").date()).days
+    fed = done >= PET_GOAL or (done > 0 and due_count(sid) == 0)
+    if fed:
+        mood, face = "сыт и доволен", "😊"
+    elif done:
+        mood, face = "уже разминается", "🙂"
+    elif gap is None:
+        mood, face = "ждёт знакомства", "👋"
+    elif gap <= 1:
+        mood, face = "проголодался", "😋"
+    elif gap <= 3:
+        mood, face = "скучает", "🥺"
+    else:
+        mood, face = "задремал", "😴"
+    return {"name": s["pet_name"] or title, "emoji": emoji, "stage": stage, "title": title,
+            "mood": mood, "face": face, "fed": fed, "done": done, "goal": PET_GOAL,
+            "total": total, "to_next": to_next, "named": bool(s["pet_name"]),
+            "need_next": need_next}
+
+
+def pet_line(sid):
+    """Короткая строка для главного экрана ученика."""
+    p = pet(sid)
+    return "{} <b>{}</b> — {} {} · сегодня {}/{}".format(
+        p["emoji"], esc(p["name"]), p["mood"], p["face"], min(p["done"], p["goal"]), p["goal"])
+
+
+def pet_bar(done, goal):
+    full = min(done, goal)
+    return "🟩" * full + "⬜" * max(goal - full, 0)
+
+
+def screen_pet(sid):
+    p = pet(sid)
+    lines = ["{} <b>{}</b>".format(p["emoji"], esc(p["name"])), "",
+             "Настроение: {} {}".format(p["mood"], p["face"]),
+             "Сегодня: {} {}/{}".format(pet_bar(p["done"], p["goal"]),
+                                        min(p["done"], p["goal"]), p["goal"])]
+    if p["to_next"]:
+        nxt = PET_STAGES[p["stage"] + 1]
+        lines.append("До стадии «{} {}» — ещё {} {}".format(
+            nxt[1], nxt[2], p["to_next"],
+            plural(p["to_next"], ("повторение", "повторения", "повторений"))))
+    else:
+        lines.append("Это последняя стадия — питомец вырос!")
+    pr = progress(sid)
+    lines += ["", "Дней подряд: <b>{}</b> · всего повторений: <b>{}</b>".format(
+        pr["streak"], p["total"])]
+    if not p["fed"]:
+        lines += ["", "<i>Чтобы покормить — повторите сегодня {} {}.</i>".format(
+            p["goal"], plural(p["goal"], ("слово", "слова", "слов")))]
+    due = due_count(sid)
+    rows = [[("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
+            [("✏️ {} питомца".format("Переименовать" if p["named"] else "Дать имя"),
+              "lrn_petname:%d" % sid)],
+            [("⬅️ Назад", "lrn:%d" % sid)]]
+    return "\n".join(lines), rows
+
+
+def pet_jobs():
+    """Вечернее напоминание и поздравление с новой стадией."""
+    now = datetime.now()
+    for s in q("SELECT * FROM students WHERE tg_user_id IS NOT NULL AND archived=0"):
+        sid = s["id"]
+        if not word_count(sid):
+            continue
+        p = pet(sid)
+        skey = "petstage:%d" % sid
+        seen = meta_get(skey)
+        if seen is None:
+            meta_set(skey, str(p["stage"]))
+        elif int(seen) < p["stage"]:
+            meta_set(skey, str(p["stage"]))
+            notify_student(sid, "🎉 <b>{}</b> подрос!\nТеперь это {} {}.".format(
+                esc(p["name"]), p["emoji"], p["title"]),
+                [[("Посмотреть", "lrn_pet:%d" % sid)]])
+        if not PET_REMIND_HOUR or now.hour < PET_REMIND_HOUR or now.hour >= 22:
+            continue
+        rkey = "petrem:%d" % sid
+        if meta_get(rkey) == today().isoformat() or p["fed"]:
+            continue
+        meta_set(rkey, today().isoformat())
+        notify_student(sid, "{} <b>{}</b> {}.\n{} {} — и он сыт до завтра.".format(
+            p["emoji"], esc(p["name"]), p["mood"], PET_GOAL,
+            plural(PET_GOAL, ("слово", "слова", "слов"))),
+            [[("🔁 Повторить слова", "lrn_go:%d" % sid)],
+             [("{} Посмотреть питомца".format(p["face"]), "lrn_pet:%d" % sid)]])
+
+
 def screen_learner(sid):
     s = sget(sid)
     if s["is_guest"]:
@@ -1516,6 +1629,8 @@ def screen_learner(sid):
                  "Слов: <b>{}</b> · выучено: <b>{}</b> ({}%)".format(total, p["learned"], p["pct"]),
                  "На повторение сегодня: <b>{}</b>".format(due),
                  "Дней подряд: <b>{}</b>".format(p["streak"])]
+        if total:
+            lines += ["", pet_line(sid)]
         if not total:
             lines += ["", "Добавьте свои слова — по одному в строке:",
                       "<code>apple - яблоко</code>",
@@ -1523,6 +1638,7 @@ def screen_learner(sid):
         rows = [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
                  ("📖 Мои слова", "lw:%d" % sid)],
+                [("🐣 Питомец", "lrn_pet:%d" % sid)],
                 [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
                 [("✍️ Записаться на занятия", "https://t.me/" + TEACHER_HANDLE)],
                 [("👩‍🏫 О преподавателе", "promo"), ("🔑 У меня есть код", "have_code")]]
@@ -1545,9 +1661,10 @@ def screen_learner(sid):
         total, due = word_count(sid), due_count(sid)
         lines = ["👋 <b>{}</b>".format(esc(s["name"])), "",
                  "📚 Слов в словаре: <b>{}</b>".format(total),
-                 "На повторение сегодня: <b>{}</b>".format(due)]
+                 "На повторение сегодня: <b>{}</b>".format(due), "", pet_line(sid)]
         rows = zoom_rows(s) + [
                 [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
+                [("🐣 Питомец", "lrn_pet:%d" % sid)],
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
                  ("📖 Мои слова", "lw:%d" % sid)],
                 [("📈 Мой прогресс", "lrn_prog:%d" % sid),
@@ -1574,6 +1691,8 @@ def screen_learner(sid):
             "{} {}".format(fmt_date(d, True), t).strip() for d, t, _ in occ)]
     total, due = word_count(sid), due_count(sid)
     lines += ["", "📚 Словарь: {} слов, на сегодня {}".format(total, due)]
+    if total:
+        lines.append(pet_line(sid))
     if s["keys"]:
         lines.append("🔑 Ключиков: {} — можно открыть бонусный материал".format(s["keys"]))
     rows = zoom_rows(s) + [[("📅 Ближайшее занятие", "lrn_next:%d" % sid)]]
@@ -1586,6 +1705,7 @@ def screen_learner(sid):
             [("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
             [("➕ Добавить слова", "lrn_add:%d" % sid),
              ("📖 Мои слова", "lw:%d" % sid)],
+            [("🐣 Питомец", "lrn_pet:%d" % sid)],
             [("📈 Мой прогресс", "lrn_prog:%d" % sid),
              ("🏆 Рейтинг", "lrn_board:%d" % sid)],
             [("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
@@ -1595,9 +1715,14 @@ def screen_learner(sid):
 
 def screen_card(sid, word, show=False):
     if not word:
+        p = pet(sid)
+        tail = "\n\n{} <b>{}</b> {}.".format(
+            p["emoji"], esc(p["name"]),
+            "сыт и доволен" if p["fed"] else "ждёт ещё немного практики")
         return ("🎉 На сегодня всё — слов на повторение больше нет.\n"
-                "Всего в словаре: {} слов.".format(word_count(sid)),
-                [[("⬅️ В меню", "lrn:%d" % sid)]])
+                "Всего в словаре: {} слов.".format(word_count(sid)) + tail,
+                [[("{} Питомец".format(p["face"]), "lrn_pet:%d" % sid)],
+                 [("⬅️ В меню", "lrn:%d" % sid)]])
     head = "📚 Осталось: {}\n\n<b>{}</b>".format(due_count(sid), esc(word["term"]))
     if not show:
         return head, [[("👀 Показать", "w_show:%d:%d" % (sid, word["id"]))],
@@ -1687,6 +1812,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd in ("lrn", "lrn_go", "lrn_add", "lrn_when", "lw", "lw_back", "lwdl",
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
+               "lrn_pet", "lrn_petname",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -1715,6 +1841,16 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                         "➕ Пришлите слова одним сообщением, по одному в строке:\n\n"
                         "<code>apple - яблоко\nto give up - сдаться</code>",
                         [[("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_pet":
+            toast(cq_id)
+            t, r = screen_pet(sid)
+            return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_petname":
+            toast(cq_id)
+            set_state(chat_id, student_id=sid, pending={"action": "petname", "sid": sid})
+            return edit(chat_id, message_id,
+                        "✏️ Как назовём питомца? Пришлите имя одним сообщением.",
+                        [[("⬅️ Назад", "lrn_pet:%d" % sid)]])
         if cmd == "lrn_next":
             toast(cq_id)
             return edit(chat_id, message_id, text_next_lesson(sid),
@@ -2283,6 +2419,15 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         set_state(chat_id, pending=None)
         t, r = screen_students(chat_id)
         return send(chat_id, "⚠️ Такого ученика в базе нет — возможно, база очищалась.\n\n" + t, r)
+
+    if action == "petname":
+        name = " ".join(text.split())[:24]
+        set_state(chat_id, pending=None)
+        if not name:
+            return send(chat_id, "Имя не распозналось, попробуйте ещё раз.")
+        run("UPDATE students SET pet_name=? WHERE id=?", (name, sid))
+        t, r = screen_pet(sid)
+        return send(chat_id, "✅ Теперь питомца зовут <b>{}</b>.\n\n".format(esc(name)) + t, r)
 
     if action == "words":
         pairs = parse_words(text)
@@ -3101,7 +3246,8 @@ def main():
             except Exception:
                 traceback.print_exc()
                 report_error(u)
-        for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys, auto_backup):
+        for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys,
+                    pet_jobs, auto_backup):
             try:
                 job()
             except Exception:
