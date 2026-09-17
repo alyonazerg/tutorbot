@@ -929,17 +929,76 @@ def screen_student(sid):
         lines.append("Ученик подключён к боту ✅")
 
     rows = [
-        [("✅ Провела", "done:%d" % sid), ("📅 Другой датой", "doned:%d" % sid)],
-        [("💰 Оплата", "pay:%d" % sid), ("🚫 Отмена урока", "cancel:%d" % sid)],
-        [("🔁 Перенести", "move:%d" % sid), ("🗓 Расписание", "sched:%d" % sid)],
-        [("📝 Домашка", "hw:%d" % sid), ("📎 Материалы", "mat:%d" % sid)],
-        [("📚 Слова", "words:%d" % sid), ("🔥 Warm-up", "warm:%d" % sid)],
-        [("📈 Прогресс", "prog:%d" % sid), ("💬 Отзывы", "fb:%d" % sid)],
-        [("📋 История", "hist:%d" % sid)],
+        [("✅ Провела", "done:%d" % sid), ("💰 Оплата", "pay:%d" % sid)],
+        [("🔥 Warm-up", "warm:%d" % sid), ("📝 Домашка", "hw:%d" % sid)],
+        [("🗓 Занятия", "schedm:%d" % sid), ("📚 Учёба", "studym:%d" % sid)],
         [("📤 Ученику", "share:%d" % sid), ("⚙️ Ещё", "more:%d" % sid)],
         [("⬅️ К ученикам", "menu")],
     ]
     return "\n".join(lines), rows
+
+
+def screen_sched_menu(sid):
+    st = stats(sid)
+    occ = upcoming(sid, 3)
+    lines = ["🗓 <b>Занятия — {}</b>".format(esc(sget(sid)["name"])), "",
+             "Расписание: " + (slots_text(sid) or "не задано"),
+             "Остаток оплаченных: <b>{}</b>".format(max(st["left"], 0))]
+    if occ:
+        lines.append("Ближайшие: " + ", ".join(
+            "{} {}".format(fmt_date(d, True), t).strip() for d, t, _ in occ))
+    return "\n".join(lines), [
+        [("✅ Провела", "done:%d" % sid), ("📅 Другой датой", "doned:%d" % sid)],
+        [("🚫 Отмена урока", "cancel:%d" % sid), ("🔁 Перенести", "move:%d" % sid)],
+        [("🗓 Постоянное расписание", "sched:%d" % sid)],
+        [("📋 История", "hist:%d" % sid)],
+        [("⬅️ Назад", "st:%d" % sid)]]
+
+
+def screen_study_menu(sid):
+    p = progress(sid)
+    lines = ["📚 <b>Учёба — {}</b>".format(esc(sget(sid)["name"])), "",
+             "Слов: <b>{}</b> · выучено: <b>{}</b> ({}%)".format(
+                 p["total"], p["learned"], p["pct"]),
+             "На сегодня: <b>{}</b> · дней подряд: <b>{}</b>".format(p["due"], p["streak"])]
+    hw = current_hw(sid)
+    if hw:
+        lines.append("Домашка: {}".format(esc(hw["text"][:60])))
+    return "\n".join(lines), [
+        [("📚 Слова", "words:%d" % sid), ("📎 Материалы", "mat:%d" % sid)],
+        [("📝 Домашка", "hw:%d" % sid), ("🔥 Warm-up", "warm:%d" % sid)],
+        [("📊 Сводка за неделю", "report:%d" % sid)],
+        [("📈 Прогресс", "prog:%d" % sid), ("💬 Отзывы", "fb:%d" % sid)],
+        [("⬅️ Назад", "st:%d" % sid)]]
+
+
+def screen_warm(sid):
+    c = lesson_context(sid)
+    lines = ["🔥 <b>Warm-up — {}</b>".format(esc(c["name"])), "",
+             "Соберу материал по лексике и грамматике, с которыми вы работали."]
+    lines.append("Уровень: <b>{}</b> · слов в работе: <b>{}</b>".format(
+        c["level"], len(c["words"])))
+    if c["hard"]:
+        lines.append("Западают: {}".format(esc(", ".join(h["term"] for h in c["hard"]))))
+    if not AI_KEY:
+        lines.append("\n<i>ИИ не подключён — соберу разминку по шаблону.</i>")
+    rows = [[("⚡ Быстрая (5 минут)", "warmgo:%d:q" % sid)],
+            [("📄 Полная (10–15 минут)", "warmgo:%d:f" % sid)],
+            [("🎯 Задать грамматику или тему", "warmtopic:%d" % sid)],
+            [("⬅️ Назад", "st:%d" % sid)]]
+    return "\n".join(lines), rows
+
+
+def send_warmup(chat_id, sid, full=False, topic=""):
+    if AI_KEY:
+        ai = ai_warmup(sid, topic=topic, full=full)
+        if ai:
+            head = "🔥 <b>Warm-up — {}</b>{}\n\n".format(
+                esc(sget(sid)["name"]), " · " + esc(topic) if topic else "")
+            return send(chat_id, head + esc(ai))
+        send(chat_id, "⚠️ ИИ не ответил ({}), собрала по шаблону.\n"
+                      "Проверить связь: /aitest".format(esc(AI_LAST["error"][:120] or "—")))
+    return send(chat_id, text_warmup(sid))
 
 
 def screen_pay(sid):
@@ -1110,10 +1169,21 @@ def fmt_num(n):
     return "{:,}".format(int(n)).replace(",", " ")
 
 
+AI_LAST = {"when": "", "kind": "", "error": "", "ok": 0}
+
+
+def ai_note(kind, error=""):
+    AI_LAST.update({"when": datetime.now().strftime("%d.%m %H:%M"), "kind": kind,
+                    "error": error[:400]})
+    if not error:
+        AI_LAST["ok"] = AI_LAST.get("ok", 0) + 1
+
+
 def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
     """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
-    ok, _ = ai_allowed()
+    ok, why = ai_allowed()
     if not ok:
+        ai_note(kind, why)
         return None
     if AI_FORMAT == "anthropic":
         payload = {"model": AI_MODEL, "max_tokens": max_tokens,
@@ -1137,41 +1207,102 @@ def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
                u.get("input_tokens", u.get("prompt_tokens", 0)),
                u.get("output_tokens", u.get("completion_tokens", 0)))
         if AI_FORMAT == "anthropic":
-            return "".join(b.get("text", "") for b in data.get("content", [])).strip()
-        return data["choices"][0]["message"]["content"].strip()
+            out = "".join(b.get("text", "") for b in data.get("content", [])).strip()
+        else:
+            out = data["choices"][0]["message"]["content"].strip()
+        if not out:
+            ai_note(kind, "модель вернула пустой ответ (stop_reason: {})".format(
+                data.get("stop_reason", "?")))
+            return None
+        ai_note(kind)
+        return out
     except urllib.error.HTTPError as e:
-        print("AI HTTP", e.code, e.read().decode("utf-8", "replace")[:300])
+        body = e.read().decode("utf-8", "replace")[:300]
+        try:
+            body = (json.loads(body).get("error") or {}).get("message", body)
+        except Exception:
+            pass
+        ai_note(kind, "HTTP {}: {}".format(e.code, body))
+        print("AI HTTP", e.code, body)
     except Exception as e:
+        ai_note(kind, "{}: {}".format(type(e).__name__, e))
         print("AI error:", type(e).__name__, e)
     return None
 
 
-def ai_warmup(sid):
-    ws = last_batch(sid, 10) or q(
-        "SELECT * FROM words WHERE student_id=? AND COALESCE(raw,0)=0 ORDER BY id DESC LIMIT 10",
+def lesson_context(sid, days=30):
+    """Чем занимались: слова, трудные слова, домашка, заметки с занятий."""
+    s_ = sget(sid)
+    since = (today() - timedelta(days=days)).isoformat()
+    ws = last_batch(sid, 12) or q(
+        "SELECT * FROM words WHERE student_id=? AND COALESCE(raw,0)=0 ORDER BY id DESC LIMIT 12",
         (sid,))
-    if not ws:
+    hard = hard_words(sid, days=14, limit=6)
+    hw = current_hw(sid)
+    notes = [l["note"] for l in q(
+        "SELECT note FROM lessons WHERE student_id=? AND held_on>=? AND note IS NOT NULL "
+        "AND note<>'' ORDER BY held_on DESC LIMIT 5", (sid, since))]
+    return {"name": s_["name"], "level": s_["level"] or "A2-B1", "words": list(ws),
+            "hard": list(hard), "hw": hw["text"] if hw else "", "notes": notes}
+
+
+def ai_warmup(sid, topic="", full=False):
+    """Разминка к занятию по лексике и грамматике, с которыми ученик работал."""
+    c = lesson_context(sid)
+    if not c["words"] and not topic:
         return None
-    pairs = "; ".join("{} — {}".format(w["term"], w["translation"]) for w in ws)
+    pairs = "; ".join("{} — {}".format(w["term"], w["translation"]) for w in c["words"])
+    weak = ", ".join(h["term"] for h in c["hard"])
+    ctx = ["Ученик: {}, уровень {}.".format(c["name"], c["level"]),
+           "Активная лексика: {}".format(pairs or "—")]
+    if weak:
+        ctx.append("Слова, которые он забывает чаще всего: {}".format(weak))
+    if c["hw"]:
+        ctx.append("Текущее домашнее задание: {}".format(c["hw"][:300]))
+    if c["notes"]:
+        ctx.append("Заметки с последних занятий: {}".format(" | ".join(n[:120]
+                                                                      for n in c["notes"])))
+    if topic:
+        ctx.append("Преподаватель просит сделать упор на: {}".format(topic))
+    grammar = ("Грамматический фокус возьми из заметок, домашнего задания или просьбы "
+               "преподавателя. Если там ничего нет — выбери конструкцию, уместную для "
+               "этого уровня, и назови её прямо.")
+    blocks = (
+        "1) LEAD-IN — три вопроса для устного старта, на них нельзя ответить одним словом;\n"
+        "2) LEXIS — восемь предложений gap-fill (пропуск ______), каждое с одним словом "
+        "ученика; предложения живые, с контекстом, не словарные;\n"
+        "3) COLLOCATIONS — пять заданий на сочетаемость: предлог, устойчивая пара или "
+        "словообразование от этих же слов;\n"
+        "4) GRAMMAR — шесть предложений на трансформацию по грамматическому фокусу "
+        "(перепиши, раскрой скобки, соедини), со словами ученика внутри;\n"
+        "5) SPEAKING — два задания на говорение: короткая ситуация-ролёвка и вопрос "
+        "на рассуждение;\n"
+        "6) KEY — ключи ко всем пунктам, кроме говорения."
+    ) if full else (
+        "1) LEAD-IN — два вопроса для устного старта;\n"
+        "2) LEXIS — шесть предложений gap-fill (пропуск ______) со словами ученика;\n"
+        "3) GRAMMAR — четыре предложения на трансформацию по грамматическому фокусу;\n"
+        "4) SPEAKING — два вопроса на говорение;\n"
+        "5) KEY — ключи."
+    )
     prompt = (
-        "Ты помогаешь преподавателю английского готовить разминку к уроку.\n"
-        "Лексика ученика: {}\n\n"
-        "Сделай по-английски, уровень A2:\n"
-        "1) шесть предложений gap-fill (пропуск обозначай ______), каждое с одним из слов, "
-        "предложения бытовые и понятные;\n"
-        "2) ключи к ним одной строкой;\n"
-        "3) четыре вопроса для обсуждения, в ответах на которые естественно использовать "
-        "эту лексику.\n\n"
-        "Оформи простым текстом с заголовками, без markdown-звёздочек, коротко."
-    ).format(pairs)
-    return ai_complete(prompt, kind="warmup", sid=sid)
+        "Ты опытный преподаватель английского, готовишь разминку к индивидуальному "
+        "занятию. Материал должен быть таким, чтобы его можно было вести прямо с экрана.\n\n"
+        "{}\n\n{}\n\nСделай блоки:\n{}\n\n"
+        "Требования: английский естественный и современный, сложность строго под уровень "
+        "{}; предложения не должны повторять друг друга по структуре; никаких пояснений "
+        "от себя, только материал. Заголовки блоков — заглавными латиницей, как выше. "
+        "Без markdown-звёздочек и без таблиц."
+    ).format("\n".join(ctx), grammar, blocks, c["level"])
+    return ai_complete(prompt, max_tokens=1600 if full else 900,
+                       kind="warmup", sid=sid)
 
 
 def ai_format_raw(sid, limit=15):
-    """Оформляет сырые слова: транскрипция, определение, синонимы, пример, перевод."""
+    """Оформляет слова без перевода: транскрипция, определение, синонимы, пример, перевод."""
     items = raw_words(sid)[:limit]
     if not items:
-        return 0, "Сырых слов нет."
+        return 0, "Слов без карточки нет."
     ok, why = ai_allowed()
     if not ok:
         return 0, why
@@ -1180,19 +1311,20 @@ def ai_format_raw(sid, limit=15):
         "Ты составляешь словарные карточки для преподавателя английского (уровень C1).\n"
         "Слова: {}\n\n"
         "Для каждого слова верни объект с полями:\n"
-        'term — слово по-английски (если дано по-русски, подбери английский эквивалент);\n'
-        'ipa — транскрипция в квадратных скобках не нужна, только символы;\n'
-        'definition — определение по-английски, как в толковом словаре, до 15 слов;\n'
-        'syn — 2-3 синонима через запятую;\n'
-        'ant — 1-2 антонима через запятую (пустая строка, если их нет);\n'
-        'coll — одно типичное сочетание с этим словом;\n'
-        'example — предложение с этим словом, естественное и не учебное;\n'
-        'translation — перевод на русский, 1-3 слова.\n\n'
+        "source — слово ровно так, как оно дано выше;\n"
+        "term — слово по-английски (если дано по-русски, подбери английский эквивалент);\n"
+        "ipa — транскрипция символами МФА, без квадратных скобок;\n"
+        "definition — определение по-английски, как в толковом словаре, до 15 слов;\n"
+        "syn — 2-3 синонима через запятую;\n"
+        "ant — 1-2 антонима через запятую (пустая строка, если их нет);\n"
+        "coll — одно типичное сочетание с этим словом;\n"
+        "example — предложение с этим словом, естественное и не учебное;\n"
+        "translation — перевод на русский, 1-3 слова.\n\n"
         "Верни массив объектов в том же порядке."
     ).format(terms)
     data = ai_json(prompt, max_tokens=260 * len(items) + 400, kind="cards", sid=sid)
     if not isinstance(data, list):
-        return 0, "ИИ не ответил или вернул непонятный формат. Попробуйте ещё раз."
+        return 0, "ИИ не ответил или вернул непонятный формат. Подробности: /ai"
     by_term = {(w["term"] or "").strip().lower(): w for w in items}
     done = 0
     for i, obj in enumerate(data):
@@ -1211,7 +1343,7 @@ def ai_format_raw(sid, limit=15):
              str(obj.get("example") or "")[:300],
              str(obj.get("translation") or "")[:120], today().isoformat(), src["id"]))
         done += 1
-    return done, ""
+    return done, "" if done else "ИИ вернул пустой список. Подробности: /ai"
 
 
 def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
@@ -1220,6 +1352,7 @@ def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
                                "и без ```.", max_tokens, kind, sid)
     if not raw:
         return None
+    head = raw.strip()[:200]
     raw = raw.strip().strip("`").strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
@@ -1234,6 +1367,7 @@ def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
                 return json.loads(raw[i:j + 1])
             except ValueError:
                 continue
+    ai_note(kind, "ответ не разобрался как JSON. Начало ответа: " + head)
     return None
 
 
@@ -1393,7 +1527,40 @@ def text_ai_usage():
         for r in who:
             lines.append("• {} — {}".format(esc(r["name"]), fmt_num(r["t"])))
     lines += ["", "<i>Модель: {}</i>".format(esc(AI_MODEL))]
+    if AI_LAST["when"]:
+        if AI_LAST["error"]:
+            lines += ["", "⚠️ <b>Последняя ошибка</b> ({}, {}):\n<code>{}</code>".format(
+                AI_LAST["when"], esc(AI_LAST["kind"]), esc(AI_LAST["error"]))]
+        else:
+            lines.append("<i>Последний запрос: {} — успешно</i>".format(AI_LAST["when"]))
     return "\n".join(lines)
+
+
+def ai_selftest():
+    """Короткая проверка связи с ИИ. Возвращает текст для чата."""
+    if not AI_KEY:
+        return "🤖 AI_KEY не задан — переменная пустая или не сохранилась в панели."
+    res = ai_complete("Ответь одним словом: готово", max_tokens=20, kind="test")
+    if res:
+        return ("✅ ИИ отвечает.\nМодель: <code>{}</code>\nОтвет: {}\n\n"
+                "Формат: {} · адрес: <code>{}</code>".format(
+                    esc(AI_MODEL), esc(res[:60]), AI_FORMAT, esc(AI_URL)))
+    hint = ""
+    err = AI_LAST["error"] or "нет ответа"
+    low = err.lower()
+    if "not_found" in low or "404" in low or "model" in low:
+        hint = ("\n\n<i>Похоже, дело в названии модели. Проверьте AI_MODEL — "
+                "рабочие варианты: claude-haiku-4-5-20251001, claude-sonnet-5.</i>")
+    elif "authentication" in low or "401" in low or "invalid x-api-key" in low:
+        hint = "\n\n<i>Ключ не принят: проверьте AI_KEY, он мог скопироваться с пробелом.</i>"
+    elif "credit" in low or "billing" in low or "402" in low:
+        hint = "\n\n<i>Нет средств на балансе Anthropic.</i>"
+    elif "429" in low:
+        hint = "\n\n<i>Слишком часто — лимит запросов. Подождите минуту.</i>"
+    elif "timed out" in low or "timeout" in low:
+        hint = "\n\n<i>Сервис не ответил вовремя. Часто бывает с самыми большими моделями.</i>"
+    return "⚠️ ИИ не отвечает.\nМодель: <code>{}</code>\nОшибка: <code>{}</code>{}".format(
+        esc(AI_MODEL), esc(err), hint)
 
 
 def text_day(chat_id):
@@ -1886,7 +2053,7 @@ def screen_pet(sid):
             p["goal"], plural(p["goal"], ("слово", "слова", "слов")))]
     due = due_count(sid)
     rows = [[("🔁 Повторить слова ({})".format(due), "lrn_go:%d" % sid)],
-            [("✏️ {} питомца".format("Переименовать" if p["named"] else "Дать имя"),
+            [("✏️ {}".format("Переименовать питомца" if p["named"] else "Дать имя питомцу"),
               "lrn_petname:%d" % sid)],
             [("⬅️ Назад", "lrn:%d" % sid)]]
     return "\n".join(lines), rows
@@ -1955,11 +2122,13 @@ def screen_learner(sid):
                  "Слов: <b>{}</b> · выучено: <b>{}</b> ({}%)".format(total, p["learned"], p["pct"]),
                  "На повторение сегодня: <b>{}</b>".format(due),
                  "Дней подряд: <b>{}</b>".format(p["streak"])]
+        raw_n = len(raw_words(sid))
         rows = [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
                 [("➕ Добавить слова", "lrn_add:%d" % sid),
-                 ("📖 Мои слова", "lw:%d" % sid)],
-                [("🧺 Сырые слова ({})".format(len(raw_words(sid))), "rawlist:%d" % sid)],
-                [("🎁 Упражнения ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
+                 ("📖 Мои слова", "lw:%d" % sid)]]
+        if raw_n:
+            rows.append([("🧺 Без карточки ({})".format(raw_n), "rawlist:%d" % sid)])
+        rows += [[("🎁 Упражнения ({}🔑)".format(s["keys"] or 0), "lrn_ex:%d" % sid)],
                 [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
                 [("⬅️ К ученикам", "menu")]]
         return "\n".join(lines), rows
@@ -2185,7 +2354,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                       pending={"action": "words", "sid": sid, "by": "ученик"})
             return edit(chat_id, message_id,
                         "➕ Пришлите слова одним сообщением, по одному в строке:\n\n"
-                        "<code>apple - яблоко\nto give up - сдаться</code>",
+                        "<code>apple - яблоко\nto give up - сдаться</code>\n\n"
+                        "Можно и просто слова без перевода — оформлю сама.",
                         [[("⬅️ Назад", "lrn:%d" % sid)]])
         if cmd == "lrn_words":
             toast(cq_id)
@@ -2648,18 +2818,34 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             flash(chat_id, "Ученик не подключён к боту — запрос отправить некуда.")
         return show(screen_fb, sid)
 
+    if cmd == "schedm":
+        return show(screen_sched_menu, sid)
+
+    if cmd == "studym":
+        return show(screen_study_menu, sid)
+
     if cmd == "warm":
-        body = None
-        if AI_KEY:
-            flash(chat_id, "🤖 Генерирую warm-up…")
-            ai = ai_warmup(sid)
-            if ai:
-                body = "🔥 <b>Warm-up — {}</b>\n\n{}".format(esc(sget(sid)["name"]), esc(ai))
-            else:
-                flash(chat_id, "ИИ недоступен — собрала разминку по шаблону.")
-        send(chat_id, body or text_warmup(sid))
-        t, r = screen_student(sid)
-        return edit(chat_id, message_id, t, r)
+        return show(screen_warm, sid)
+
+    if cmd == "warmgo":
+        full = parts[2] == "f"
+        edit(chat_id, message_id, "🔥 Собираю материал{}…".format(
+            " (это займёт до минуты)" if full else ""), [])
+        send_warmup(chat_id, sid, full=full)
+        t, r = screen_warm(sid)
+        return send(chat_id, t, r)
+
+    if cmd == "warmtopic":
+        set_state(chat_id, student_id=sid, pending={"action": "warmtopic", "sid": sid})
+        return edit(chat_id, message_id,
+                    "🎯 Что отработать? Например: <code>Present Perfect vs Past Simple</code>, "
+                    "<code>фразовые глаголы с get</code>, <code>еда и заказ в кафе</code>.",
+                    [[("⬅️ Назад", "warm:%d" % sid)]])
+
+    if cmd == "aitest":
+        edit(chat_id, message_id, "🔌 Проверяю связь с ИИ…", [])
+        return edit(chat_id, message_id, ai_selftest(),
+                    [[("🔄 Ещё раз", "aitest")], [("⬅️ К ученикам", "menu")]])
 
     if cmd == "report":
         edit(chat_id, message_id, "📊 Собираю сводку…", [])
@@ -2770,8 +2956,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         rows = [[("💵 Ставка за занятие", "rate:%d" % sid)],
                 [("🎥 Ссылка на Zoom", "zoom:%d" % sid),
                  ("🎚 {}".format(s["level"] or "уровень"), "lvl:%d" % sid)],
-                [("🔑 Выдать ключик", "givekey:%d" % sid),
-                 ("📊 Сводка за неделю", "report:%d" % sid)],
+                [("🔑 Выдать ключик", "givekey:%d" % sid)],
                 [("🔗 Код: взрослый", "code:%d" % sid),
                  ("🔗 Код: ребёнок", "codek:%d" % sid)],
                 [("✏️ Переименовать", "ren:%d" % sid)],
@@ -2849,6 +3034,14 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
                     [[("🎁 Ещё упражнение", "lrn_ex:%d" % sid)],
                      [("⬅️ В меню", "lrn:%d" % sid)]])
 
+    if action == "warmtopic":
+        topic = text.strip()[:120]
+        set_state(chat_id, pending=None)
+        send(chat_id, "🔥 Собираю материал по теме «{}»…".format(esc(topic)))
+        send_warmup(chat_id, sid, full=True, topic=topic)
+        t, r = screen_warm(sid)
+        return send(chat_id, t, r)
+
     if action == "petname":
         name = " ".join(text.split())[:24]
         set_state(chat_id, pending=None)
@@ -2859,13 +3052,42 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send(chat_id, "✅ Теперь питомца зовут <b>{}</b>.\n\n".format(esc(name)) + t, r)
 
     if action == "words":
-        pairs = parse_words(text)
-        if not pairs:
-            return send(chat_id, "Не разобрала. Формат: <code>apple - яблоко</code>, "
-                                 "по одному слову в строке.")
+        pairs, bare = [], []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            got = parse_words(line)
+            if got:
+                pairs.append(got[0])
+            else:
+                bare.append(line[:100])
+        if not pairs and not bare:
+            return send(chat_id, "Не разобрала. Пришлите слова по одному в строке — "
+                                 "можно парой <code>apple - яблоко</code>, можно одним "
+                                 "словом.")
         n = add_words(sid, pairs, pending.get("by", "педагог"))
+        me = sget(sid)
+        extra = ""
+        if bare:
+            for it in bare:
+                run("INSERT INTO words (student_id, term, translation, added_by, due, "
+                    "created, raw) VALUES (?,?,?,?,?,?,1)",
+                    (sid, it, "", pending.get("by", "педагог"), "2099-01-01",
+                     today().isoformat()))
+            if me["is_self"] and AI_KEY:
+                send(chat_id, "✨ Оформляю {} {} через ИИ…".format(
+                    len(bare), plural(len(bare), ("слово", "слова", "слов"))))
+                done, why = ai_format_raw(sid, limit=len(bare))
+                n += done
+                if done < len(bare):
+                    extra = "\n🧺 Без карточки осталось: {}{}".format(
+                        len(bare) - done, " — " + why if why else "")
+            else:
+                extra = "\n🧺 Без перевода: {} — лежат в сырых словах.".format(len(bare))
         set_state(chat_id, pending=None)
-        flash(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.".format(n))
+        flash(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.{}".format(
+            n, extra))
         if pending.get("by") == "ученик":
             owner = None if sget(sid)["is_guest"] else owner_chat(sid)
             if owner:
@@ -3224,7 +3446,12 @@ def handle_command(chat_id, user_id, text):
         return send(chat_id, t, r)
 
     if cmd in ("ai", "ии", "токены"):
-        return send(chat_id, text_ai_usage(), [[("⬅️ К ученикам", "menu")]])
+        return send(chat_id, text_ai_usage(),
+                    [[("🔌 Проверить связь", "aitest")], [("⬅️ К ученикам", "menu")]])
+
+    if cmd in ("aitest", "тест"):
+        send(chat_id, "🔌 Проверяю…")
+        return send(chat_id, ai_selftest())
 
     if cmd in ("today", "сегодня", "день"):
         body = text_day(chat_id)
