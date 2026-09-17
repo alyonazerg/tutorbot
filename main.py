@@ -1462,67 +1462,30 @@ def ai_warmup(sid, topic="", full=False):
                                kind="warmup", sid=sid)
 
 
-def ai_fix_words(sid, pairs):
-    """Чинит опечатки, приводит к начальной форме и проверяет перевод.
-    Возвращает (исправленные пары, список заметок об исправлениях)."""
-    ok, _ = ai_allowed()
-    if not ok or not pairs:
-        return pairs, []
-    body = "\n".join("{}. {} = {}".format(i + 1, t, tr) for i, (t, tr) in enumerate(pairs))
-    prompt = (
-        "Ты редактируешь словарь ученика английского (уровень {}).\n"
-        "Для каждой пары «слово = перевод» сделай следующее:\n"
-        "— исправь опечатку в английском слове (strick → strict), если она есть;\n"
-        "— приведи к начальной форме: глагол без to, существительное в единственном "
-        "числе, прилагательное в положительной степени. Не трогай устойчивые выражения "
-        "и фразовые глаголы;\n"
-        "— проверь перевод: если он неверен или не соответствует форме, исправь; "
-        "перевод давай в начальной форме и не длиннее трёх слов.\n\n{}\n\n"
-        "Верни массив объектов: n (номер), term, translation, note — что именно "
-        "исправлено, по-русски и очень коротко; если ничего не менял, note — пустая "
-        "строка."
-    ).format(level_of(sid), body)
-    data = ai_json(prompt, max_tokens=120 * len(pairs) + 300, kind="spell", sid=sid)
-    if not isinstance(data, list):
-        return pairs, []
-    out, notes = list(pairs), []
-    for obj in data:
-        if not isinstance(obj, dict):
-            continue
-        try:
-            i = int(obj.get("n", 0)) - 1
-        except (TypeError, ValueError):
-            continue
-        if not 0 <= i < len(out):
-            continue
-        term = str(obj.get("term") or out[i][0])[:100].strip()
-        tr = str(obj.get("translation") or out[i][1])[:150].strip()
-        if (term, tr) != out[i]:
-            notes.append("{} → {} — {}".format(
-                out[i][0] if term != out[i][0] else out[i][1],
-                term if term != out[i][0] else tr,
-                str(obj.get("note") or "поправлено")[:80]))
-            out[i] = (term, tr)
-    return out, notes
-
-
-def ai_format_raw(sid, limit=15):
-    """Оформляет слова без перевода: транскрипция, определение, синонимы, пример, перевод."""
-    items = raw_words(sid)[:limit]
+def ai_format_raw(sid, limit=15, items=None):
+    """Оформляет слова в полные карточки: транскрипция, определение, синонимы, пример."""
+    items = list(items) if items is not None else raw_words(sid)[:limit]
     if not items:
         return 0, "Слов без карточки нет."
     ok, why = ai_allowed()
     if not ok:
         return 0, why
-    terms = "; ".join(w["term"] for w in items)
+    terms = "\n".join("{}. {}{}".format(
+        i + 1, w["term"], " = " + w["translation"] if w["translation"] else "")
+        for i, w in enumerate(items))
     prompt = (
         "Ты составляешь словарные карточки для преподавателя английского. "
         "Уровень владения языком: {}, поэтому определения и примеры должны быть "
         "взрослыми и точными, без упрощений.\n"
-        "Слова: {}\n\n"
-        "Для каждого слова верни объект с полями:\n"
-        "source — слово ровно так, как оно дано выше;\n"
-        "term — слово по-английски (если дано по-русски, подбери английский эквивалент);\n"
+        "Список (слово, иногда с переводом через знак =):\n{}\n\n"
+        "Слово может быть дано по-английски или по-русски — карточка всегда делается "
+        "для английского слова. Если оно дано по-русски, подбери самый частотный "
+        "английский эквивалент. Если перевод дан, сохрани его смысл, но исправь, "
+        "если он неточен или не совпадает по форме. Опечатки в английском исправляй "
+        "(strick → strict), слово приводи к начальной форме.\n\n"
+        "Для каждой строки верни объект с полями:\n"
+        "n — номер строки;\n"
+        "term — слово по-английски в начальной форме;\n"
         "ipa — транскрипция символами МФА, без квадратных скобок;\n"
         "definition — определение по-английски, как в толковом словаре, до 15 слов;\n"
         "syn — 2-3 синонима через запятую;\n"
@@ -1540,7 +1503,15 @@ def ai_format_raw(sid, limit=15):
     for i, obj in enumerate(data):
         if not isinstance(obj, dict):
             continue
-        src = by_term.get(str(obj.get("source") or "").strip().lower())
+        src = None
+        try:
+            k = int(obj.get("n", 0)) - 1
+            if 0 <= k < len(items):
+                src = items[k]
+        except (TypeError, ValueError):
+            pass
+        if src is None:
+            src = by_term.get(str(obj.get("source") or "").strip().lower())
         if src is None:
             src = items[i] if i < len(items) else None
         if src is None:
@@ -3475,67 +3446,89 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send(chat_id, "✅ Теперь питомца зовут <b>{}</b>.\n\n".format(esc(name)) + t, r)
 
     if action == "words":
-        pairs, bare = [], []
+        entries = []
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
             got = parse_words(line)
-            if got:
-                pairs.append(got[0])
-            else:
-                bare.append(line[:100])
-        if not pairs and not bare:
+            entries.append(got[0] if got else (line[:100], ""))
+            if len(entries) >= 25:
+                break
+        if not entries:
             return send(chat_id, "Не разобрала. Пришлите слова по одному в строке — "
                                  "можно парой <code>apple - яблоко</code>, можно одним "
-                                 "словом.")
+                                 "словом, хоть по-русски.")
         me = sget(sid)
-        extra = ""
-        notes = []
-        if pairs and AI_KEY:
-            pairs, notes = ai_fix_words(sid, pairs)
-        n = add_words(sid, pairs, pending.get("by", "педагог"))
-        if notes:
-            extra += "\n✏️ Поправила: " + "; ".join(esc(x) for x in notes[:8])
-        if bare:
-            for it in bare:
-                run("INSERT INTO words (student_id, term, translation, added_by, due, "
-                    "created, raw) VALUES (?,?,?,?,?,?,1)",
-                    (sid, it, "", pending.get("by", "педагог"), "2099-01-01",
-                     today().isoformat()))
-            if me["is_self"] and AI_KEY:
-                send(chat_id, "✨ Оформляю {} {} через ИИ…".format(
-                    len(bare), plural(len(bare), ("слово", "слова", "слов"))))
-                done, why = ai_format_raw(sid, limit=len(bare))
-                n += done
-                if done < len(bare):
-                    extra = "\n🧺 Без карточки осталось: {}{}".format(
-                        len(bare) - done, " — " + why if why else "")
-            else:
-                extra = "\n🧺 Без перевода: {} — лежат в сырых словах.".format(len(bare))
+        by = pending.get("by", "педагог")
         set_state(chat_id, pending=None)
-        flash(chat_id, "✅ Добавлено слов: <b>{}</b>. Первое повторение — сегодня.{}".format(
-            n, extra))
+        extra, added = "", []
+
+        if AI_KEY:
+            send(chat_id, "✨ Оформляю {} {}…".format(
+                len(entries), plural(len(entries), ("слово", "слова", "слов"))))
+            ids = [run("INSERT INTO words (student_id, term, translation, added_by, due, "
+                       "created, raw) VALUES (?,?,?,?,?,?,1)",
+                       (sid, t, tr, by, "2099-01-01", today().isoformat()))
+                   for t, tr in entries]
+            rows_in = q("SELECT * FROM words WHERE id IN ({})".format(
+                ",".join("?" * len(ids))), tuple(ids))
+            rows_in = sorted(rows_in, key=lambda w: ids.index(w["id"]))
+            done, why = ai_format_raw(sid, items=rows_in)
+            added = q("SELECT * FROM words WHERE id IN ({}) AND COALESCE(raw,0)=0 "
+                      "ORDER BY id".format(",".join("?" * len(ids))), tuple(ids))
+            n = len(added)
+            if n < len(entries):
+                extra = "\n🧺 Без карточки осталось: {}{}".format(
+                    len(entries) - n, " — " + why if why else "")
+        else:
+            pairs = [(t, tr) for t, tr in entries if tr]
+            n = add_words(sid, pairs, by)
+            for t, tr in entries:
+                if not tr:
+                    run("INSERT INTO words (student_id, term, translation, added_by, due, "
+                        "created, raw) VALUES (?,?,?,?,?,?,1)",
+                        (sid, t, "", by, "2099-01-01", today().isoformat()))
+            if len(entries) - n:
+                extra = "\n🧺 Без перевода: {} — лежат в сырых словах.".format(
+                    len(entries) - n)
+            added = q("SELECT * FROM words WHERE student_id=? AND COALESCE(raw,0)=0 "
+                      "ORDER BY id DESC LIMIT ?", (sid, n))
+            added = list(reversed(added))
+
+        body = "✅ Добавлено слов: <b>{}</b>{}".format(n, extra)
+        if added:
+            body += "\n\n" + "\n".join(
+                "• <b>{}</b>{} — {}".format(
+                    esc(w["term"]), " [{}]".format(esc(w["ipa"])) if w["ipa"] else "",
+                    esc(w["translation"] or "")) for w in added)
+            body += "\n\nПервое повторение — сегодня."
+        send(chat_id, body)
+
         if pending.get("after"):
-            set_state(chat_id, pending=None)
-            ws = q("SELECT * FROM words WHERE student_id=? ORDER BY id DESC LIMIT ?",
-                   (sid, n))
-            if ws and me["tg_user_id"]:
+            if added and me["tg_user_id"]:
                 notify_student(sid, "📚 <b>Слова с занятия</b>\n\n{}\n\n"
-                                    "Они уже в вашем словаре — повторим завтра.".format(
+                                    "Они уже в вашем словаре.".format(
                                         "\n".join("• {} — {}".format(esc(w["term"]),
-                                                                    esc(w["translation"]))
-                                                  for w in reversed(ws))),
+                                                                     esc(w["translation"]))
+                                                  for w in added)),
                                [[("🔁 Повторить сейчас", "lrn_go:%d" % sid)]])
             t, r = screen_after(sid, pending["lid"])
             return send(chat_id, t, r)
-        if pending.get("by") == "ученик":
-            owner = None if sget(sid)["is_guest"] else owner_chat(sid)
+        if by == "ученик":
+            owner = None if me["is_guest"] else owner_chat(sid)
             if owner:
                 send(owner, "📚 <b>{}</b> добавил(а) {} новых слов в словарь.".format(
-                    esc(sget(sid)["name"]), n))
+                    esc(me["name"]), n))
+            t, r = screen_learner(sid)
+        elif me["is_self"]:
             t, r = screen_learner(sid)
         else:
+            if me["tg_user_id"] and added:
+                notify_student(sid, "📚 <b>Новые слова от преподавателя</b>\n\n{}".format(
+                    "\n".join("• {} — {}".format(esc(w["term"]), esc(w["translation"]))
+                               for w in added)),
+                               [[("🔁 Повторить сейчас", "lrn_go:%d" % sid)]])
             t, r = screen_words(sid)
         return send(chat_id, t, r)
 
