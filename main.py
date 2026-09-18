@@ -50,7 +50,13 @@ PAY_DETAILS = "+7 913 391-77-45 — ВТБ (Алёна П.)"
 CANCEL_REASONS = ["по просьбе ученика", "по моей просьбе", "болезнь", "другое"]
 KEY_MIN_REVIEWS = 5  # сколько повторений за день нужно для ключика
 PET_GOAL = 5         # сколько повторений за день «кормят» питомца
-PET_REMIND_HOUR = int(os.environ.get("TG_PET_HOUR", "18") or 0)  # 0 — без напоминаний
+PET_REMIND_HOUR = int(os.environ.get("TG_PET_HOUR", "18") or 0)
+FIN_HOUR = int(os.environ.get("TG_FIN_HOUR", "21") or 0)  # вечерний вопрос о тратах
+MONTHS = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август",
+          "сентябрь", "октябрь", "ноябрь", "декабрь")
+FIN_CATS = ("Продукты", "Кафе и доставка", "Транспорт", "Здоровье", "Дом и быт",
+            "Одежда", "Связь и подписки", "Развлечения", "Подарки", "Образование",
+            "Питомцы", "Кредиты", "Прочее")  # 0 — без напоминаний
 # Стадии: сколько всего повторений нужно, значок, название
 PET_STAGES = [(0, "🥚", "Яйцо"), (30, "🐣", "Птенец"), (120, "🐥", "Цыплёнок"),
               (300, "🦜", "Попугай"), (700, "🦉", "Мудрая сова")]
@@ -97,6 +103,7 @@ HELP = (
     "/level C2 — ваш уровень для карточек и упражнений\n"
     "/week — расписание на неделю\n"
     "/archive — архив учеников\n"
+    "/money — траты, доходы и кредиты\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
     "/id — ваш Telegram ID"
@@ -395,6 +402,14 @@ CREATE TABLE IF NOT EXISTS ex_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     on_date TEXT, student_id INTEGER, kind TEXT,
     tasks TEXT, answers TEXT, feedback TEXT);
+CREATE TABLE IF NOT EXISTS fin_tx (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    on_date TEXT, kind TEXT, amount REAL, title TEXT, category TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS fin_cat (merchant TEXT PRIMARY KEY, category TEXT);
+CREATE TABLE IF NOT EXISTS credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT, balance REAL, rate REAL, min_pay REAL, fee REAL DEFAULT 0,
+    pay_day INTEGER, closed INTEGER DEFAULT 0, created TEXT);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -2103,6 +2118,229 @@ def text_next_lesson(sid):
     return "\n".join(lines)
 
 
+# -------------------------------------------------------------------- Деньги
+
+MONEY_RE = re.compile(r"^([+\-]?)\s*([\d][\d \u00a0]*(?:[.,]\d{1,2})?)\s*(?:р|руб|₽)?\s*"
+                      r"[-—:]?\s*(.*)$|^(.+?)\s+([+\-]?)([\d][\d \u00a0]*"
+                      r"(?:[.,]\d{1,2})?)\s*(?:р|руб|₽)?$", re.I)
+
+
+def money_parse(line):
+    """«пятёрочка 1200», «1200 пятёрочка», «+5000 занятие» → (kind, сумма, название)."""
+    line = line.strip()
+    if not line:
+        return None
+    m = MONEY_RE.match(line)
+    if not m:
+        return None
+    if m.group(2):
+        sign, num, title = m.group(1), m.group(2), (m.group(3) or "").strip()
+    else:
+        title, sign, num = (m.group(4) or "").strip(), m.group(5), m.group(6)
+    try:
+        amount = float(num.replace(" ", "").replace("\u00a0", "").replace(",", "."))
+    except ValueError:
+        return None
+    if amount <= 0 or not title:
+        return None
+    return ("income" if sign == "+" else "expense", amount, title[:60])
+
+
+def looks_like_money(text):
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    return bool(lines) and len(lines) <= 20 and all(money_parse(l) for l in lines)
+
+
+def fin_category(titles):
+    """Категории для названий: сначала из справочника, остальное — одним запросом к ИИ."""
+    out, unknown = {}, []
+    for t in titles:
+        key = t.strip().lower()
+        row = q("SELECT category FROM fin_cat WHERE merchant=?", (key,), one=True)
+        if row and row["category"]:
+            out[t] = row["category"]
+        else:
+            unknown.append(t)
+    if unknown and ai_allowed()[0]:
+        data = ai_json(
+            "Определи категорию траты по названию места или покупки.\n"
+            "Категории строго из списка: {}\n\nНазвания:\n{}\n\n"
+            "Верни массив объектов: n (номер), category (ровно из списка).".format(
+                ", ".join(FIN_CATS),
+                "\n".join("{}. {}".format(i + 1, t) for i, t in enumerate(unknown))),
+            max_tokens=40 * len(unknown) + 200, kind="money")
+        if isinstance(data, list):
+            for obj in data:
+                if not isinstance(obj, dict):
+                    continue
+                try:
+                    i = int(obj.get("n", 0)) - 1
+                except (TypeError, ValueError):
+                    continue
+                cat = str(obj.get("category") or "").strip()
+                if 0 <= i < len(unknown) and cat in FIN_CATS:
+                    out[unknown[i]] = cat
+                    run("INSERT OR REPLACE INTO fin_cat (merchant, category) VALUES (?,?)",
+                        (unknown[i].strip().lower(), cat))
+    for t in titles:
+        out.setdefault(t, "Прочее")
+    return out
+
+
+def fin_add(lines, d=None):
+    """Записывает траты и поступления. Возвращает добавленные строки."""
+    items = [money_parse(l) for l in lines]
+    items = [i for i in items if i]
+    if not items:
+        return []
+    cats = fin_category([t for k, a, t in items if k == "expense"])
+    added = []
+    for kind, amount, title in items:
+        cat = cats.get(title, "Прочее") if kind == "expense" else "Доход"
+        run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
+            "VALUES (?,?,?,?,?,?)",
+            ((d or today()).isoformat(), kind, amount, title, cat,
+             datetime.now().isoformat(timespec="seconds")))
+        added.append((kind, amount, title, cat))
+    return added
+
+
+def money(n):
+    return "{:,.0f} ₽".format(n).replace(",", " ")
+
+
+def fin_month(since=None, until=None):
+    since = since or today().replace(day=1)
+    until = until or today()
+    rows = q("SELECT kind, category, SUM(amount) s, COUNT(*) c FROM fin_tx "
+             "WHERE on_date BETWEEN ? AND ? GROUP BY kind, category ORDER BY s DESC",
+             (since.isoformat(), until.isoformat()))
+    inc = sum(r["s"] for r in rows if r["kind"] == "income")
+    exp = sum(r["s"] for r in rows if r["kind"] == "expense")
+    cats = [(r["category"], r["s"], r["c"]) for r in rows if r["kind"] == "expense"]
+    return inc, exp, cats
+
+
+def fin_free_month():
+    """Сколько в среднем остаётся за месяц — по данным последних 90 дней."""
+    since = today() - timedelta(days=90)
+    r = q("SELECT COALESCE(SUM(CASE WHEN kind='income' THEN amount ELSE 0 END),0) i, "
+          "COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) e, "
+          "MIN(on_date) d FROM fin_tx WHERE on_date>=?", (since.isoformat(),), one=True)
+    if not r["d"]:
+        return 0, 0
+    days = max((today() - datetime.strptime(r["d"], "%Y-%m-%d").date()).days + 1, 7)
+    return (r["i"] - r["e"]) * 30.0 / days, days
+
+
+def credit_forecast(extra=0.0):
+    """Гасим по минимальному платежу плюс свободные деньги — лавиной по ставке."""
+    cs = [dict(id=c["id"], name=c["name"], bal=c["balance"] or 0,
+               rate=(c["rate"] or 0) / 100.0 / 12, mp=c["min_pay"] or 0,
+               fee=c["fee"] or 0)
+          for c in q("SELECT * FROM credits WHERE closed=0 ORDER BY rate DESC")]
+    if not cs:
+        return [], 0, 0
+    months, paid, closed = 0, 0.0, []
+    while any(c["bal"] > 0 for c in cs) and months < 600:
+        months += 1
+        pool = extra
+        for c in cs:
+            if c["bal"] <= 0:
+                continue
+            c["bal"] += c["bal"] * c["rate"] + c["fee"]
+            pay = min(c["mp"], c["bal"])
+            c["bal"] -= pay
+            paid += pay
+        target = next((c for c in cs if c["bal"] > 0), None)
+        if target and pool:
+            pay = min(pool, target["bal"])
+            target["bal"] -= pay
+            paid += pay
+        for c in cs:
+            if c["bal"] <= 0.5 and not any(x[0] == c["name"] for x in closed):
+                closed.append((c["name"], months))
+    return closed, months, paid
+
+
+def screen_money():
+    inc, exp, cats = fin_month()
+    free, days = fin_free_month()
+    lines = ["💰 <b>Деньги — {} {}</b>".format(MONTHS[today().month - 1], today().year), "",
+             "Поступления: <b>{}</b>".format(money(inc)),
+             "Траты: <b>{}</b>".format(money(exp)),
+             "Остаток месяца: <b>{}</b>".format(money(inc - exp))]
+    if cats:
+        lines += ["", "<b>На что уходит</b>"]
+        for name, s, c in cats[:7]:
+            share = round(s * 100 / exp) if exp else 0
+            lines.append("• {} — {} ({}%)".format(name, money(s), share))
+    cs = q("SELECT * FROM credits WHERE closed=0 ORDER BY rate DESC")
+    if cs:
+        total = sum(c["balance"] or 0 for c in cs)
+        lines += ["", "<b>Кредиты</b> — всего {}".format(money(total))]
+        for c in cs:
+            lines.append("• {} — {} · {}% · платёж {}".format(
+                esc(c["name"]), money(c["balance"] or 0), c["rate"] or 0,
+                money(c["min_pay"] or 0)))
+        closed, months, paid = credit_forecast(max(free, 0))
+        if months:
+            lines += ["", "<b>Прогноз</b>"]
+            if free > 0:
+                lines.append("Свободно в месяц: <b>{}</b> (по данным за {} дн.{})".format(
+                    money(free), days, ", оценка грубая" if days < 21 else ""))
+            for name, m in closed:
+                lines.append("• {} закроется через {} {}".format(
+                    esc(name), m, plural(m, ("месяц", "месяца", "месяцев"))))
+            lines.append("Проценты и комиссии сверху: <b>{}</b>".format(
+                money(max(paid - sum(c["balance"] or 0 for c in cs), 0))))
+    else:
+        lines += ["", "<i>Кредиты не заведены — добавьте, и появится прогноз.</i>"]
+    rows = [[("➕ Кредит", "cr_add"), ("💳 Кредиты", "cr_list")],
+            [("📊 За месяц", "fin_month"), ("📁 Выгрузка", "fin_csv")],
+            [("⬅️ К ученикам", "menu")]]
+    return "\n".join(lines), rows
+
+
+def screen_credits():
+    cs = q("SELECT * FROM credits ORDER BY closed, rate DESC")
+    if not cs:
+        return ("💳 Кредитов пока нет.", [[("➕ Добавить", "cr_add")],
+                                         [("⬅️ Назад", "money")]])
+    lines = ["💳 <b>Кредиты</b>", ""]
+    rows = []
+    for c in cs:
+        mark = "✅ " if c["closed"] else ""
+        lines.append("{}<b>{}</b> — {} · {}% · платёж {}{}".format(
+            mark, esc(c["name"]), money(c["balance"] or 0), c["rate"] or 0,
+            money(c["min_pay"] or 0),
+            " · комиссия {}".format(money(c["fee"])) if c["fee"] else ""))
+        if not c["closed"]:
+            rows.append([("💸 Платёж — {}".format(c["name"][:14]), "cr_pay:%d" % c["id"]),
+                         ("🗑", "cr_del:%d" % c["id"])])
+    rows += [[("➕ Добавить", "cr_add")], [("⬅️ Назад", "money")]]
+    return "\n".join(lines), rows
+
+
+def fin_ask():
+    """Вечерний вопрос о тратах — один раз в день."""
+    if not FIN_HOUR or not OWNER_ID:
+        return
+    if datetime.now().hour < FIN_HOUR or datetime.now().hour >= 23:
+        return
+    if meta_get("finask") == today().isoformat():
+        return
+    meta_set("finask", today().isoformat())
+    n = q("SELECT COUNT(*) c FROM fin_tx WHERE on_date=?", (today().isoformat(),),
+          one=True)["c"]
+    if n:
+        return
+    send(OWNER_ID, "💸 <b>Что сегодня потратили?</b>\n\nПришлите строками, как удобно:\n"
+                   "<code>пятёрочка 1200\nцппк 250\n+4000 занятие Аня</code>\n\n"
+                   "Категории подберу сама.",
+         [[("Сегодня без трат", "fin_none")], [("💰 Открыть деньги", "money")]])
+
+
 # ---------------------------------------------------------------- Упражнения ИИ
 
 EX_TYPES = [
@@ -2207,7 +2445,7 @@ def ai_check(sid, kind, items, answers):
     return ai_complete(prompt, max_tokens=700, kind="check:" + kind, sid=sid)
 
 
-def screen_ex(sid):
+def screen_ex(sid, mode="choice"):
     s = sget(sid)
     mine = bool(s["is_self"])
     keys = 1 if mine else (s["keys"] or 0)
@@ -2217,20 +2455,24 @@ def screen_ex(sid):
     lines += (["", "<i>Свои упражнения — без ключиков.</i>"] if mine else
               ["Одно упражнение — один 🔑 ключик.", "",
                "Ключиков у вас: <b>{}</b>".format(keys)])
+    lines.append("<i>Значок у задания — формат, который для него единственно "
+                 "возможный.</i>")
     if not keys:
         lines += ["", "<i>Ключики дают за: все повторения за день, новую стадию питомца, "
                       "серию без пропусков и победу в рейтинге. Ещё их выдаёт "
                       "преподаватель.</i>"]
     rows = []
     if keys:
+        other = "text" if mode == "choice" else "choice"
+        rows.append([("Формат: {} → сменить на {}".format(
+            "🔘 кнопками" if mode == "choice" else "✍️ письменно",
+            "✍️ письменно" if mode == "choice" else "🔘 кнопками"),
+            "lrn_ex:%d:%s" % (sid, other))])
         for k, title, hint, modes, _ in EX_TYPES:
-            if len(modes) == 1:
-                mark = "🔘 кнопками" if modes[0] == "choice" else "✍️ письменно"
-                rows.append([("{} · {}".format(title, mark),
-                              "lrn_exgo:%d:%s:%s" % (sid, k, modes[0]))])
-            else:
-                rows.append([("{} · 🔘".format(title), "lrn_exgo:%d:%s:choice" % (sid, k)),
-                             ("✍️", "lrn_exgo:%d:%s:text" % (sid, k))])
+            use = mode if mode in modes else modes[0]
+            mark = "" if use == mode else (" · 🔘" if use == "choice" else " · ✍️")
+            rows.append([("{}{}".format(title, mark),
+                          "lrn_exgo:%d:%s:%s" % (sid, k, use))])
     rows.append([("⬅️ Назад", "lrn:%d" % sid)])
     return "\n".join(lines), rows
 
@@ -2513,7 +2755,7 @@ def card_back(w, pro=False):
     lines = ["<b>{}</b>{}".format(esc(w["term"]),
                                   " [{}]".format(esc(w["ipa"])) if w["ipa"] else "")]
     if not pro and w["definition"]:
-        lines.append(esc(w["definition"]))
+        lines.append("<blockquote>{}</blockquote>".format(esc(w["definition"])))
     for tag, val in (("Syn", w["syn"]), ("Ant", w["ant"]), ("Coll", w["coll"])):
         if val:
             lines.append("<i>{}:</i> {}".format(tag, esc(val)))
@@ -2539,16 +2781,17 @@ def screen_card(sid, word, show=False):
     s = sget(sid)
     pro = bool(s["is_self"]) and bool(word["definition"])
     head = "📚 Осталось: {}".format(due_count(sid))
-    front = word["definition"] if pro else word["term"]
+    front = ("<blockquote>{}</blockquote>".format(esc(word["definition"])) if pro
+             else "<b>{}</b>".format(esc(word["term"])))
     if not show:
-        return "{}\n\n{}".format(head, esc(front)), [
+        return "{}\n\n{}".format(head, front), [
             [("👀 Показать", "w_show:%d:%d" % (sid, word["id"]))],
             [("⬅️ Выйти", "lrn:%d" % sid)]]
     labels = (("❌", "Снова", 0), ("😕", "Трудно", 1), ("🙂", "Хорошо", 2), ("😎", "Легко", 3))
     ivls = " · ".join("{} {}".format(e, ivl_label(preview_ivl(word, g)))
                       for e, _, g in labels)
     text = "{}\n\n{}\n➖➖➖\n{}\n\n<i>{}</i>".format(
-        head, esc(front), card_back(word, pro), ivls)
+        head, front, card_back(word, pro), ivls)
     rows = [[("{} {}".format(e, n), "w_g:%d:%d:%d" % (sid, word["id"], g))
              for e, n, g in labels],
             [("🗑 Удалить слово", "w_del:%d:%d" % (sid, word["id"])),
@@ -2683,7 +2926,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_ex":
             toast(cq_id)
-            t, r = screen_ex(sid)
+            t, r = screen_ex(sid, parts[2] if len(parts) > 2 else "choice")
             return edit(chat_id, message_id, t, r)
         if cmd == "lrn_exgo":
             kind = parts[2]
@@ -3101,6 +3344,62 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "hist":
         return show(screen_history, sid)
 
+    if cmd == "money":
+        t, r = screen_money()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "cr_list":
+        t, r = screen_credits()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "cr_add":
+        set_state(chat_id, pending={"action": "credit"})
+        return edit(chat_id, message_id,
+                    "💳 Пришлите одной строкой: <b>название, остаток, ставка, "
+                    "минимальный платёж</b> — и, если есть, комиссия.\n\n"
+                    "<code>Тинькофф, 350000, 25.9, 12000</code>\n"
+                    "<code>Сбер, 120000, 19.5, 6000, 590</code>",
+                    [[("⬅️ Назад", "cr_list")]])
+
+    if cmd == "cr_pay":
+        set_state(chat_id, pending={"action": "credit_pay", "cid": int(parts[1])})
+        c = q("SELECT * FROM credits WHERE id=?", (int(parts[1]),), one=True)
+        return edit(chat_id, message_id,
+                    "💸 Сколько внесли по «{}»? Остаток сейчас {}.".format(
+                        esc(c["name"]), money(c["balance"] or 0)),
+                    [[("⬅️ Назад", "cr_list")]])
+
+    if cmd == "cr_del":
+        run("DELETE FROM credits WHERE id=?", (int(parts[1]),))
+        toast(cq_id, "Удалено")
+        t, r = screen_credits()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_none":
+        toast(cq_id, "Записала")
+        return edit(chat_id, message_id, "👌 День без трат — отметила.", [])
+
+    if cmd == "fin_month":
+        inc, exp, cats = fin_month()
+        lines = ["📊 <b>Месяц</b>", "", "Поступления: {}".format(money(inc)),
+                 "Траты: {}".format(money(exp)), ""]
+        for name, s_, c in cats:
+            lines.append("• {} — {} ({})".format(name, money(s_), c))
+        return edit(chat_id, message_id, "\n".join(lines), [[("⬅️ Назад", "money")]])
+
+    if cmd == "fin_csv":
+        rows_ = q("SELECT on_date, kind, amount, title, category FROM fin_tx "
+                  "ORDER BY on_date DESC, id DESC")
+        buf = io.StringIO()
+        w = csv.writer(buf, delimiter=";")
+        w.writerow(["дата", "тип", "сумма", "название", "категория"])
+        for r_ in rows_:
+            w.writerow([r_["on_date"], "доход" if r_["kind"] == "income" else "трата",
+                        r_["amount"], r_["title"], r_["category"]])
+        send_document(chat_id, "money_{}.csv".format(today().isoformat()), buf.getvalue(),
+                      "Все траты и поступления")
+        return toast(cq_id, "Отправила")
+
     if cmd == "wundo":
         ids = [int(x) for x in parts[1].split(",") if x.isdigit()]
         for wid in ids:
@@ -3473,6 +3772,46 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         last = ai_last(chat_id) or {}
         return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
                        last.get("kind", "misc"), last.get("sid"))
+
+    if action == "credit":
+        bits = [b.strip() for b in re.split(r"[,;]", text) if b.strip()]
+        if len(bits) < 4:
+            return send(chat_id, "Нужно минимум четыре части: название, остаток, ставка, "
+                                 "платёж.")
+        try:
+            name = bits[0][:40]
+            nums = [float(b.replace(" ", "").replace(",", ".")) for b in bits[1:5]]
+        except ValueError:
+            return send(chat_id, "Не разобрала числа. Например:\n"
+                                 "<code>Тинькофф, 350000, 25.9, 12000</code>")
+        run("INSERT INTO credits (name, balance, rate, min_pay, fee, created) "
+            "VALUES (?,?,?,?,?,?)",
+            (name, nums[0], nums[1], nums[2], nums[3] if len(nums) > 3 else 0,
+             today().isoformat()))
+        set_state(chat_id, pending=None)
+        flash(chat_id, "✅ Кредит «{}» добавлен.".format(esc(name)))
+        t, r = screen_money()
+        return send(chat_id, t, r)
+
+    if action == "credit_pay":
+        m = re.search(r"[\d][\d ]*(?:[.,]\d+)?", text)
+        if not m:
+            return send(chat_id, "Нужна сумма платежа, например 12000.")
+        amount = float(m.group().replace(" ", "").replace(",", "."))
+        c = q("SELECT * FROM credits WHERE id=?", (pending["cid"],), one=True)
+        left = max((c["balance"] or 0) - amount, 0)
+        run("UPDATE credits SET balance=?, closed=? WHERE id=?",
+            (left, 1 if left <= 0.5 else 0, c["id"]))
+        run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
+            "VALUES (?,?,?,?,?,?)",
+            (today().isoformat(), "expense", amount, "Платёж: " + c["name"], "Кредиты",
+             datetime.now().isoformat(timespec="seconds")))
+        set_state(chat_id, pending=None)
+        flash(chat_id, "✅ Платёж {} записан. Остаток по «{}»: {}{}".format(
+            money(amount), esc(c["name"]), money(left),
+            " — закрыт! 🎉" if left <= 0.5 else ""))
+        t, r = screen_money()
+        return send(chat_id, t, r)
 
     if action == "warmtopic":
         topic = text.strip()[:120]
@@ -3942,6 +4281,10 @@ def handle_command(chat_id, user_id, text):
 
     if cmd in ("month", "месяц"):
         t, r = screen_month(chat_id)
+        return send(chat_id, t, r)
+
+    if cmd in ("money", "деньги", "траты"):
+        t, r = screen_money()
         return send(chat_id, t, r)
 
     if cmd in ("archive", "архив"):
@@ -4450,6 +4793,17 @@ def handle(update):
         pending = get_state(chat_id)["pending"]
         if pending:
             return handle_pending(chat_id, pending, text, user_id, msg.get("entities"))
+        if is_owner(user_id) and looks_like_money(text):
+            added = fin_add([l for l in text.splitlines() if l.strip()])
+            if added:
+                body = ["💸 <b>Записала</b>", ""]
+                for kind, amount, title, cat in added:
+                    body.append("{} {} — {} · <i>{}</i>".format(
+                        "➕" if kind == "income" else "•", money(amount), esc(title), cat))
+                inc, exp, _ = fin_month()
+                body += ["", "С начала месяца: +{} / −{}".format(money(inc), money(exp))]
+                return send(chat_id, "\n".join(body),
+                            [[("💰 Деньги", "money")]])
         if is_owner(user_id) and looks_like_wordlist(text):
             me = self_student(chat_id, user_id)
             return handle_pending(chat_id,
@@ -4510,6 +4864,7 @@ def main():
     tg("setMyCommands", commands=[
         {"command": "students", "description": "Ученики"},
         {"command": "today", "description": "Занятия сегодня"},
+        {"command": "money", "description": "Деньги и кредиты"},
         {"command": "ai", "description": "Расход токенов ИИ"},
         {"command": "level", "description": "Мой уровень для ИИ-заданий"},
         {"command": "week", "description": "Ближайшая неделя"},
@@ -4534,7 +4889,8 @@ def main():
                 traceback.print_exc()
                 report_error(u)
         for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys,
-                    pet_jobs, streak_keys, weekly_board, weekly_report, auto_backup):
+                    pet_jobs, streak_keys, weekly_board, weekly_report, fin_ask,
+                    auto_backup):
             try:
                 job()
             except Exception:
