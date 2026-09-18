@@ -948,7 +948,8 @@ def screen_students(chat_id):
     if line:
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
-    rows.append([("📚 Мой словарь", "myw"), ("💌 Визитка", "promo_me")])
+    rows.append([("📚 Мой словарь", "myw"), ("💰 Деньги", "money")])
+    rows.append([("💌 Визитка", "promo_me")])
     rows.append([("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
@@ -2187,10 +2188,12 @@ def fin_category(titles):
     return out
 
 
-def fin_add(lines, d=None):
+def fin_add(lines, d=None, force=None):
     """Записывает траты и поступления. Возвращает добавленные строки."""
     items = [money_parse(l) for l in lines]
     items = [i for i in items if i]
+    if force:
+        items = [(force, a, t) for k, a, t in items]
     if not items:
         return []
     cats = fin_category([t for k, a, t in items if k == "expense"])
@@ -2296,10 +2299,47 @@ def screen_money():
                 money(max(paid - sum(c["balance"] or 0 for c in cs), 0))))
     else:
         lines += ["", "<i>Кредиты не заведены — добавьте, и появится прогноз.</i>"]
-    rows = [[("➕ Кредит", "cr_add"), ("💳 Кредиты", "cr_list")],
-            [("📊 За месяц", "fin_month"), ("📁 Выгрузка", "fin_csv")],
+    rows = [[("➕ Трата", "fin_new:e"), ("➕ Поступление", "fin_new:i")],
+            [("🧾 Сегодня", "fin_day"), ("📊 За месяц", "fin_month")],
+            [("💳 Кредиты", "cr_list"), ("📁 Выгрузка", "fin_csv")],
             [("⬅️ К ученикам", "menu")]]
     return "\n".join(lines), rows
+
+
+def screen_fin_day(d=None):
+    d = d or today()
+    rows_ = q("SELECT * FROM fin_tx WHERE on_date=? ORDER BY id DESC", (d.isoformat(),))
+    lines = ["🧾 <b>Записи за {}</b>".format(fmt_date(d, True)), ""]
+    if not rows_:
+        lines.append("Пока пусто. Пришлите строкой: <code>пятёрочка 1200</code>")
+    btns = []
+    for r_ in rows_:
+        lines.append("{} {} — {} · <i>{}</i>".format(
+            "➕" if r_["kind"] == "income" else "•", money(r_["amount"]),
+            esc(r_["title"]), r_["category"]))
+        btns.append([("{} {}".format(money(r_["amount"]), r_["title"][:16]),
+                      "fin_item:%d" % r_["id"])])
+    return "\n".join(lines), btns + [[("⬅️ Назад", "money")]]
+
+
+def screen_fin_item(tid):
+    r_ = q("SELECT * FROM fin_tx WHERE id=?", (tid,), one=True)
+    if not r_:
+        return "Запись не найдена.", [[("⬅️ Назад", "fin_day")]]
+    text = "{} <b>{}</b> — {}\nКатегория: <b>{}</b>\n\nМожно поменять категорию — " \
+           "запомню её и для следующих трат в этом месте.".format(
+               "➕" if r_["kind"] == "income" else "•", esc(r_["title"]),
+               money(r_["amount"]), r_["category"])
+    cats, row = [], []
+    for c in FIN_CATS:
+        row.append((c, "fin_cat:%d:%s" % (tid, c)))
+        if len(row) == 2:
+            cats.append(row)
+            row = []
+    if row:
+        cats.append(row)
+    return text, cats + [[("🗑 Удалить запись", "fin_del:%d" % tid)],
+                         [("⬅️ Назад", "fin_day")]]
 
 
 def screen_credits():
@@ -2316,8 +2356,8 @@ def screen_credits():
             money(c["min_pay"] or 0),
             " · комиссия {}".format(money(c["fee"])) if c["fee"] else ""))
         if not c["closed"]:
-            rows.append([("💸 Платёж — {}".format(c["name"][:14]), "cr_pay:%d" % c["id"]),
-                         ("🗑", "cr_del:%d" % c["id"])])
+            rows.append([("💸 Платёж — {}".format(c["name"][:12]), "cr_pay:%d" % c["id"]),
+                         ("✏️", "cr_edit:%d" % c["id"]), ("🗑", "cr_del:%d" % c["id"])])
     rows += [[("➕ Добавить", "cr_add")], [("⬅️ Назад", "money")]]
     return "\n".join(lines), rows
 
@@ -3170,6 +3210,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = fn(*a)
         edit(chat_id, message_id, t, r)
 
+    if cmd.startswith(("fin_", "cr_", "money")):
+        sid = None
     if sid is not None and not student(sid):
         t, r = screen_students(chat_id)
         return edit(chat_id, message_id,
@@ -3374,6 +3416,51 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         toast(cq_id, "Удалено")
         t, r = screen_credits()
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_day":
+        t, r = screen_fin_day()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_item":
+        t, r = screen_fin_item(int(parts[1]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_cat":
+        tid, cat = int(parts[1]), parts[2]
+        r_ = q("SELECT * FROM fin_tx WHERE id=?", (tid,), one=True)
+        if r_:
+            run("UPDATE fin_tx SET category=? WHERE id=?", (cat, tid))
+            run("INSERT OR REPLACE INTO fin_cat (merchant, category) VALUES (?,?)",
+                (r_["title"].strip().lower(), cat))
+        toast(cq_id, "Категория: " + cat)
+        t, r = screen_fin_day()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_del":
+        run("DELETE FROM fin_tx WHERE id=?", (int(parts[1]),))
+        toast(cq_id, "Удалено")
+        t, r = screen_fin_day()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "fin_new":
+        kind = "i" if parts[1] == "i" else "e"
+        set_state(chat_id, pending={"action": "fin_new", "kind": kind})
+        return edit(chat_id, message_id,
+                    "➕ Пришлите {}, по одной в строке:\n\n<code>{}</code>".format(
+                        "поступления" if kind == "i" else "траты",
+                        "занятие Аня 2500\nвозврат 900" if kind == "i"
+                        else "пятёрочка 1200\nцппк 250"),
+                    [[("⬅️ Назад", "money")]])
+
+    if cmd == "cr_edit":
+        c = q("SELECT * FROM credits WHERE id=?", (int(parts[1]),), one=True)
+        set_state(chat_id, pending={"action": "credit", "cid": c["id"]})
+        return edit(chat_id, message_id,
+                    "✏️ Пришлите новые данные одной строкой:\n\n"
+                    "<code>{}, {:.0f}, {}, {:.0f}{}</code>".format(
+                        c["name"], c["balance"] or 0, c["rate"] or 0, c["min_pay"] or 0,
+                        ", {:.0f}".format(c["fee"]) if c["fee"] else ""),
+                    [[("⬅️ Назад", "cr_list")]])
 
     if cmd == "fin_none":
         toast(cq_id, "Записала")
@@ -3773,6 +3860,21 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
                        last.get("kind", "misc"), last.get("sid"))
 
+    if action == "fin_new":
+        lines = [l for l in text.splitlines() if l.strip()]
+        added = fin_add(lines, force="income" if pending.get("kind") == "i" else "expense")
+        set_state(chat_id, pending=None)
+        if not added:
+            return send(chat_id, "Не разобрала. Нужна сумма и название: "
+                                 "<code>пятёрочка 1200</code>")
+        body = ["💸 <b>Записала</b>", ""]
+        for kind, amount, title, cat in added:
+            body.append("{} {} — {} · <i>{}</i>".format(
+                "➕" if kind == "income" else "•", money(amount), esc(title), cat))
+        send(chat_id, "\n".join(body))
+        t, r = screen_money()
+        return send(chat_id, t, r)
+
     if action == "credit":
         bits = [b.strip() for b in re.split(r"[,;]", text) if b.strip()]
         if len(bits) < 4:
@@ -3784,12 +3886,19 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         except ValueError:
             return send(chat_id, "Не разобрала числа. Например:\n"
                                  "<code>Тинькофф, 350000, 25.9, 12000</code>")
-        run("INSERT INTO credits (name, balance, rate, min_pay, fee, created) "
-            "VALUES (?,?,?,?,?,?)",
-            (name, nums[0], nums[1], nums[2], nums[3] if len(nums) > 3 else 0,
-             today().isoformat()))
+        fee = nums[3] if len(nums) > 3 else 0
+        if pending.get("cid"):
+            run("UPDATE credits SET name=?, balance=?, rate=?, min_pay=?, fee=?, "
+                "closed=? WHERE id=?",
+                (name, nums[0], nums[1], nums[2], fee, 1 if nums[0] <= 0.5 else 0,
+                 pending["cid"]))
+        else:
+            run("INSERT INTO credits (name, balance, rate, min_pay, fee, created) "
+                "VALUES (?,?,?,?,?,?)",
+                (name, nums[0], nums[1], nums[2], fee, today().isoformat()))
         set_state(chat_id, pending=None)
-        flash(chat_id, "✅ Кредит «{}» добавлен.".format(esc(name)))
+        flash(chat_id, "✅ Кредит «{}» {}.".format(
+            esc(name), "обновлён" if pending.get("cid") else "добавлен"))
         t, r = screen_money()
         return send(chat_id, t, r)
 
