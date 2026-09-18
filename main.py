@@ -259,7 +259,9 @@ def send(chat_id, text, rows=None):
     return send_one(chat_id, text, rows)
 
 
-def send_one(chat_id, text, rows=None):
+def send_one(chat_id, text, rows=None, temp=False):
+    if not temp:
+        clear_temp(chat_id)
     res = tg("sendMessage", chat_id=chat_id, text=text[:4000], parse_mode="HTML",
              reply_markup=markup(rows), disable_web_page_preview=True)
     if res.get("ok"):
@@ -284,6 +286,26 @@ def edit(chat_id, message_id, text, rows=None):
 def delete_message(chat_id, message_id):
     if message_id:
         tg("deleteMessage", chat_id=chat_id, message_id=message_id)
+
+
+TEMP_MSG = {}
+
+
+def send_temp(chat_id, text):
+    """Сообщение «подождите»: исчезнет, как только придёт настоящий ответ."""
+    res = send_one(chat_id, text, temp=True)
+    mid = ((res or {}).get("result") or {}).get("message_id")
+    if mid:
+        TEMP_MSG.setdefault(chat_id, []).append(mid)
+    return res
+
+
+def clear_temp(chat_id):
+    for mid in TEMP_MSG.pop(chat_id, []):
+        try:
+            delete_message(chat_id, mid)
+        except Exception:
+            pass
 
 
 def flash(chat_id, text, rows=None):
@@ -855,6 +877,20 @@ def leaderboard(chat_id, me_sid=None, real_names=False):
         mark = "→" if sid == me_sid else " "
         out.append("{}{:<13}{:>5}{:>6}{:>6}".format(mark, name[:13], learned, p["pct"], rev7))
     return pre("\n".join(out))
+
+
+def looks_like_wordlist(text):
+    """Похоже ли сообщение на список слов или выражений, а не на фразу или заметку."""
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    if len(lines) < 2 or len(lines) > 40:
+        return False
+    for l in lines:
+        if len(l) > 70 or l.startswith("/"):
+            return False
+        body = l.split(" - ")[0].split(" — ")[0].split(" = ")[0].strip()
+        if len(body.split()) > 5 or body.endswith((".", "!", "?", ":")):
+            return False
+    return True
 
 
 def parse_words(text):
@@ -2508,12 +2544,13 @@ def screen_card(sid, word, show=False):
         return "{}\n\n{}".format(head, esc(front)), [
             [("👀 Показать", "w_show:%d:%d" % (sid, word["id"]))],
             [("⬅️ Выйти", "lrn:%d" % sid)]]
-    text = "{}\n\n{}\n➖➖➖\n{}".format(head, esc(front), card_back(word, pro))
-    labels = (("Снова", 0), ("Трудно", 1), ("Хорошо", 2), ("Легко", 3))
-    rows = [[("{} · {}".format(n, ivl_label(preview_ivl(word, g))),
-              "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[:2]],
-            [("{} · {}".format(n, ivl_label(preview_ivl(word, g))),
-              "w_g:%d:%d:%d" % (sid, word["id"], g)) for n, g in labels[2:]],
+    labels = (("❌", "Снова", 0), ("😕", "Трудно", 1), ("🙂", "Хорошо", 2), ("😎", "Легко", 3))
+    ivls = " · ".join("{} {}".format(e, ivl_label(preview_ivl(word, g)))
+                      for e, _, g in labels)
+    text = "{}\n\n{}\n➖➖➖\n{}\n\n<i>{}</i>".format(
+        head, esc(front), card_back(word, pro), ivls)
+    rows = [[("{} {}".format(e, n), "w_g:%d:%d:%d" % (sid, word["id"], g))
+             for e, n, g in labels],
             [("🗑 Удалить слово", "w_del:%d:%d" % (sid, word["id"])),
              ("⬅️ Выйти", "lrn:%d" % sid)]]
     return text, rows
@@ -3064,6 +3101,15 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "hist":
         return show(screen_history, sid)
 
+    if cmd == "wundo":
+        ids = [int(x) for x in parts[1].split(",") if x.isdigit()]
+        for wid in ids:
+            run("DELETE FROM reviews WHERE word_id=?", (wid,))
+            run("DELETE FROM words WHERE id=?", (wid,))
+        toast(cq_id, "Убрано")
+        return edit(chat_id, message_id, "↩️ Убрала {} {} из словаря.".format(
+            len(ids), plural(len(ids), ("слово", "слова", "слов"))), [])
+
     if cmd == "myw":
         me = self_student(chat_id, user_id)
         set_state(chat_id, pending=None)
@@ -3205,7 +3251,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         if not ai_last(chat_id):
             return toast(cq_id, "Нечего продолжать")
         toast(cq_id, "Дописываю…")
-        send(chat_id, "▶️ Дописываю…")
+        send_temp(chat_id, "▶️ Дописываю…")
         out, why = ai_refine(chat_id, "Ты не дописал до конца. Продолжи ровно с того "
                                       "места, где оборвался, не повторяя уже написанное. "
                                       "Пришли только продолжение.")
@@ -3402,7 +3448,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         items = pending.get("items") or []
         answers = [l.strip() for l in text.strip().split("\n") if l.strip()]
         set_state(chat_id, pending=None)
-        send(chat_id, "🔎 Проверяю…")
+        send_temp(chat_id, "🔎 Проверяю…")
         res = ai_check(sid, pending.get("kind", ""), items, answers)
         if not res:
             if not sget(sid)["is_self"]:
@@ -3420,7 +3466,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
 
     if action == "refine":
         set_state(chat_id, pending=None)
-        send(chat_id, "✏️ Переделываю…")
+        send_temp(chat_id, "✏️ Переделываю…")
         out, why = ai_refine(chat_id, text.strip()[:500])
         if not out:
             return send(chat_id, "⚠️ " + esc(why))
@@ -3431,7 +3477,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
     if action == "warmtopic":
         topic = text.strip()[:120]
         set_state(chat_id, pending=None)
-        send(chat_id, "🔥 Собираю материал по теме «{}»…".format(esc(topic)))
+        send_temp(chat_id, "🔥 Собираю материал по теме «{}»…".format(esc(topic)))
         send_warmup(chat_id, sid, full=True, topic=topic)
         t, r = screen_warm(sid)
         return send(chat_id, t, r)
@@ -3465,7 +3511,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         extra, added = "", []
 
         if AI_KEY:
-            send(chat_id, "✨ Оформляю {} {}…".format(
+            send_temp(chat_id, "✨ Оформляю {} {}…".format(
                 len(entries), plural(len(entries), ("слово", "слова", "слов"))))
             ids = [run("INSERT INTO words (student_id, term, translation, added_by, due, "
                        "created, raw) VALUES (?,?,?,?,?,?,1)",
@@ -3496,13 +3542,25 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
                       "ORDER BY id DESC LIMIT ?", (sid, n))
             added = list(reversed(added))
 
-        body = "✅ Добавлено слов: <b>{}</b>{}".format(n, extra)
+        head = ("📥 <b>В мой словарь</b> — {} {}{}".format(
+                    n, plural(n, ("слово", "слова", "слов")), extra)
+                if pending.get("quick") else
+                "✅ Добавлено слов: <b>{}</b>{}".format(n, extra))
+        body = head
         if added:
             body += "\n\n" + "\n".join(
                 "• <b>{}</b>{} — {}".format(
                     esc(w["term"]), " [{}]".format(esc(w["ipa"])) if w["ipa"] else "",
                     esc(w["translation"] or "")) for w in added)
             body += "\n\nПервое повторение — сегодня."
+        if pending.get("quick"):
+            ids = ",".join(str(w["id"]) for w in added[:25])
+            rows = [[("🔁 Повторить сейчас", "lrn_go:%d" % sid)],
+                    [("📖 Мой словарь", "myw")]]
+            if ids and len(ids) < 60:
+                rows.insert(1, [("↩️ Убрать эти слова", "wundo:%s" % ids)])
+            send(chat_id, body, rows)
+            return
         send(chat_id, body)
 
         if pending.get("after"):
@@ -3516,7 +3574,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             t, r = screen_after(sid, pending["lid"])
             return send(chat_id, t, r)
         if by == "ученик":
-            owner = None if me["is_guest"] else owner_chat(sid)
+            owner = None if (me["is_guest"] or me["is_self"]) else owner_chat(sid)
             if owner:
                 send(owner, "📚 <b>{}</b> добавил(а) {} новых слов в словарь.".format(
                     esc(me["name"]), n))
@@ -3907,7 +3965,7 @@ def handle_command(chat_id, user_id, text):
                     [[("🔌 Проверить связь", "aitest")], [("⬅️ К ученикам", "menu")]])
 
     if cmd in ("aitest", "тест"):
-        send(chat_id, "🔌 Проверяю…")
+        send_temp(chat_id, "🔌 Проверяю…")
         return send(chat_id, ai_selftest())
 
     if cmd in ("today", "сегодня", "день"):
@@ -4392,6 +4450,12 @@ def handle(update):
         pending = get_state(chat_id)["pending"]
         if pending:
             return handle_pending(chat_id, pending, text, user_id, msg.get("entities"))
+        if is_owner(user_id) and looks_like_wordlist(text):
+            me = self_student(chat_id, user_id)
+            return handle_pending(chat_id,
+                                  {"action": "words", "sid": me["id"], "by": "педагог",
+                                   "quick": 1},
+                                  text, user_id, msg.get("entities"))
         t, r = screen_students(chat_id)
         return send(chat_id, t, r)
 
