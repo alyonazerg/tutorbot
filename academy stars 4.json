@@ -1,0 +1,904 @@
+{
+ "id": "academy_stars_4",
+ "title": "Academy Stars 4",
+ "level": "A1+ (A1 Movers)",
+ "audience": "дети",
+ "lesson_minutes": 45,
+ "note": "Лексика собрана из воркшитов распознаванием; основа — тема юнита из scope and sequence.",
+ "units": [
+  {
+   "n": 1,
+   "title": "Holiday news",
+   "pb_page": 8,
+   "vocabulary_topic": "The world around us; prepositions of place and activities; leisure activities",
+   "wordlist": [
+    "freddy",
+    "village",
+    "island",
+    "duck",
+    "chicken",
+    "black",
+    "lake",
+    "volcano",
+    "waterfall",
+    "forest",
+    "town",
+    "mountain",
+    "biking",
+    "circled",
+    "school",
+    "choir",
+    "stomach",
+    "chorus",
+    "technology",
+    "clock",
+    "neck",
+    "did",
+    "grandpa"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "1.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: The world around us; prepositions of place and activities; leisure activities",
+     "vocabulary": "The world around us; prepositions of place and activities; leisure activities"
+    },
+    {
+     "n": 2,
+     "code": "1.2",
+     "title": "Grammar 1",
+     "objective": "Past simple question forms",
+     "grammar": "Past simple question forms: Did he hide in the wardrobe? Was it scary?"
+    },
+    {
+     "n": 3,
+     "code": "1.3",
+     "title": "Reading",
+     "objective": "Text messages: interpret events; How do you learn best?",
+     "reading": "Text messages: interpret events; How do you learn best?"
+    },
+    {
+     "n": 4,
+     "code": "1.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "verb + …ing",
+     "grammar": "verb + …ing: I love skateboarding. I don't mind surfing."
+    },
+    {
+     "n": 5,
+     "code": "1.5",
+     "title": "Listening & Speaking",
+     "objective": "Ask questions about a holiday photo",
+     "listening": "Listen for specific information",
+     "speaking": "Ask questions about a holiday photo"
+    },
+    {
+     "n": 6,
+     "code": "1.6",
+     "title": "Writing",
+     "objective": "Text messages: write messages",
+     "writing": "Text messages: write messages"
+    },
+    {
+     "n": 7,
+     "code": "1.7",
+     "title": "Sounds and spelling",
+     "objective": "ch or ck /k/",
+     "phonics": "ch or ck /k/"
+    },
+    {
+     "n": 8,
+     "code": "1.8",
+     "title": "Think about it!",
+     "objective": "Let's do a survey"
+    }
+   ],
+   "extras": "Reading time 1: True travellers' tales of kindness · Play 1: Jane and the special butterfly"
+  },
+  {
+   "n": 2,
+   "title": "Different lives",
+   "pb_page": 22,
+   "vocabulary_topic": "Prepositions of movement; verbs and action verbs",
+   "wordlist": [
+    "kato",
+    "wasa",
+    "ran",
+    "off",
+    "tree",
+    "coat",
+    "shoes",
+    "count",
+    "seconds",
+    "past",
+    "jumped",
+    "forgot",
+    "take",
+    "tie",
+    "hundred",
+    "can",
+    "july",
+    "because",
+    "onto",
+    "text",
+    "stump",
+    "alog",
+    "hole",
+    "verbs",
+    "joke",
+    "found",
+    "looks",
+    "wears",
+    "blue",
+    "green",
+    "but",
+    "yesterday",
+    "wore",
+    "book",
+    "end",
+    "day",
+    "teacher",
+    "have",
+    "them",
+    "song"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "2.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Prepositions of movement; verbs and action verbs",
+     "vocabulary": "Prepositions of movement; verbs and action verbs"
+    },
+    {
+     "n": 2,
+     "code": "2.2",
+     "title": "Grammar 1",
+     "objective": "verbs with to + infinitive",
+     "grammar": "verbs with to + infinitive: He wanted to climb the mountain."
+    },
+    {
+     "n": 3,
+     "code": "2.3",
+     "title": "Reading",
+     "objective": "A traditional story: identify speakers and events; asking classmates for help",
+     "reading": "A traditional story: identify speakers and events; asking classmates for help"
+    },
+    {
+     "n": 4,
+     "code": "2.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "could / couldn't and when clauses in the past",
+     "grammar": "could / couldn't and when clauses in the past: Could you whistle a tune when you were eight?"
+    },
+    {
+     "n": 5,
+     "code": "2.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about your school",
+     "listening": "Listen for specific information",
+     "speaking": "Talk about your school"
+    },
+    {
+     "n": 6,
+     "code": "2.6",
+     "title": "Writing",
+     "objective": "A story: write a summary",
+     "writing": "A story: write a summary"
+    },
+    {
+     "n": 7,
+     "code": "2.7",
+     "title": "Sounds and spelling",
+     "objective": "j or g /dʒ/",
+     "phonics": "j or g /dʒ/"
+    },
+    {
+     "n": 8,
+     "code": "2.8",
+     "title": "Think about it!",
+     "objective": "Appreciate how people make different choices"
+    }
+   ]
+  },
+  {
+   "n": 3,
+   "title": "Super cycling",
+   "pb_page": 34,
+   "vocabulary_topic": "Bikes and cycling; tour items and locations; directions",
+   "wordlist": [
+    "finally",
+    "banana",
+    "wheels",
+    "bike",
+    "eggs",
+    "cyclist",
+    "sometimes",
+    "wears",
+    "right",
+    "bounfe",
+    "them",
+    "make",
+    "first",
+    "top",
+    "yoghurt"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "3.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Bikes and cycling; tour items and locations; directions",
+     "vocabulary": "Bikes and cycling; tour items and locations; directions"
+    },
+    {
+     "n": 2,
+     "code": "3.2",
+     "title": "Grammar 1",
+     "objective": "must and mustn't for obligation",
+     "grammar": "must and mustn't for obligation: You must look. You mustn't listen to music."
+    },
+    {
+     "n": 3,
+     "code": "3.3",
+     "title": "Reading",
+     "objective": "A leaflet: identify specific information; using what you know",
+     "reading": "A leaflet: identify specific information; using what you know"
+    },
+    {
+     "n": 4,
+     "code": "3.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Give directions",
+     "grammar": "Give directions: First, we go straight on to the hospital. And then, we turn right."
+    },
+    {
+     "n": 5,
+     "code": "3.5",
+     "title": "Listening & Speaking",
+     "objective": "Give directions",
+     "listening": "Follow directions",
+     "speaking": "Give directions"
+    },
+    {
+     "n": 6,
+     "code": "3.6",
+     "title": "Writing",
+     "objective": "A leaflet: write a list with bullet points",
+     "writing": "A leaflet: write a list with bullet points"
+    },
+    {
+     "n": 7,
+     "code": "3.7",
+     "title": "Sounds and spelling",
+     "objective": "soft c (s) /s/",
+     "phonics": "soft c (s) /s/"
+    },
+    {
+     "n": 8,
+     "code": "3.8",
+     "title": "Think about it!",
+     "objective": "Play the Bike Grid game"
+    }
+   ],
+   "extras": "Reading time 2: Journey to the Centre of the Earth · Play 2: Peter and the skateboarding competition"
+  },
+  {
+   "n": 4,
+   "title": "People at work",
+   "pb_page": 48,
+   "vocabulary_topic": "Jobs; adjectives; animals",
+   "wordlist": [
+    "than",
+    "dangerous",
+    "most",
+    "difficult",
+    "exciting",
+    "creative",
+    "interesting",
+    "beautiful",
+    "police",
+    "officer",
+    "lawyer",
+    "caterpillar",
+    "flower",
+    "computer"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "4.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Jobs; adjectives; animals",
+     "vocabulary": "Jobs; adjectives; animals"
+    },
+    {
+     "n": 2,
+     "code": "4.2",
+     "title": "Grammar 1",
+     "objective": "Comparative form of long adjectives",
+     "grammar": "Comparative form of long adjectives: Mary's cake is more creative than Ruben's."
+    },
+    {
+     "n": 3,
+     "code": "4.3",
+     "title": "Reading",
+     "objective": "Blog posts: develop inferential skills; using prefixes to change meaning",
+     "reading": "Blog posts: develop inferential skills; using prefixes to change meaning"
+    },
+    {
+     "n": 4,
+     "code": "4.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Superlative form of long adjectives",
+     "grammar": "Superlative form of long adjectives: Mosquitoes are the most dangerous."
+    },
+    {
+     "n": 5,
+     "code": "4.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about preferences",
+     "listening": "Listen for opinions",
+     "speaking": "Talk about preferences"
+    },
+    {
+     "n": 6,
+     "code": "4.6",
+     "title": "Writing",
+     "objective": "A blog: write a blog post",
+     "writing": "A blog: write a blog post"
+    },
+    {
+     "n": 7,
+     "code": "4.7",
+     "title": "Sounds and spelling",
+     "objective": "er or or ending /ə/",
+     "phonics": "er or or ending /ə/"
+    },
+    {
+     "n": 8,
+     "code": "4.8",
+     "title": "Think about it!",
+     "objective": "Let's find out: opinions about jobs"
+    }
+   ]
+  },
+  {
+   "n": 5,
+   "title": "Be healthy! Be happy!",
+   "pb_page": 60,
+   "vocabulary_topic": "At the doctor's; adjectives and verbs for staying healthy; shops",
+   "wordlist": [
+    "should",
+    "let's",
+    "shouldn't",
+    "fish",
+    "flu",
+    "sofa",
+    "advice",
+    "clo"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "5.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: At the doctor's; adjectives and verbs for staying healthy; shops",
+     "vocabulary": "At the doctor's; adjectives and verbs for staying healthy; shops"
+    },
+    {
+     "n": 2,
+     "code": "5.2",
+     "title": "Grammar 1",
+     "objective": "should and shouldn't for advice",
+     "grammar": "should and shouldn't for advice: You should be active. You shouldn't eat too many sweets."
+    },
+    {
+     "n": 3,
+     "code": "5.3",
+     "title": "Reading",
+     "objective": "A magazine article: understand detail; asking questions",
+     "reading": "A magazine article: understand detail; asking questions"
+    },
+    {
+     "n": 4,
+     "code": "5.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Make suggestions",
+     "grammar": "Make suggestions: Let's go to the bakery to buy some bread."
+    },
+    {
+     "n": 5,
+     "code": "5.5",
+     "title": "Listening & Speaking",
+     "objective": "A dialogue at the doctor's",
+     "listening": "Listen for specific information",
+     "speaking": "A dialogue at the doctor's"
+    },
+    {
+     "n": 6,
+     "code": "5.6",
+     "title": "Writing",
+     "objective": "A letter: write a letter",
+     "writing": "A letter: write a letter"
+    },
+    {
+     "n": 7,
+     "code": "5.7",
+     "title": "Sounds and spelling",
+     "objective": "gh or ph /f/",
+     "phonics": "gh or ph /f/"
+    },
+    {
+     "n": 8,
+     "code": "5.8",
+     "title": "Think about it!",
+     "objective": "Plan healthy meals"
+    }
+   ]
+  },
+  {
+   "n": 6,
+   "title": "Stories from far away",
+   "pb_page": 70,
+   "vocabulary_topic": "The natural world; verbs and pronouns; verbs and activities",
+   "wordlist": [
+    "o'clock",
+    "flower",
+    "feeling",
+    "shooting",
+    "planta",
+    "eating",
+    "playing",
+    "stream",
+    "branch",
+    "nest",
+    "world",
+    "campfire",
+    "star",
+    "leaf",
+    "leaves",
+    "tree",
+    "there's",
+    "green",
+    "night",
+    "essay",
+    "clock",
+    "six",
+    "doing",
+    "going",
+    "helping",
+    "travelling"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "6.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: The natural world; verbs and pronouns; verbs and activities",
+     "vocabulary": "The natural world; verbs and pronouns; verbs and activities"
+    },
+    {
+     "n": 2,
+     "code": "6.2",
+     "title": "Grammar 1",
+     "objective": "Past continuous",
+     "grammar": "Past continuous: Yesterday at six o'clock, he was sleeping. He wasn't doing his homework."
+    },
+    {
+     "n": 3,
+     "code": "6.3",
+     "title": "Reading",
+     "objective": "A story: interpret stories; learning new vocabulary using colour",
+     "reading": "A story: interpret stories; learning new vocabulary using colour"
+    },
+    {
+     "n": 4,
+     "code": "6.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Ask questions using the past continuous",
+     "grammar": "Ask questions using the past continuous: Where were you going?"
+    },
+    {
+     "n": 5,
+     "code": "6.5",
+     "title": "Listening & Speaking",
+     "objective": "Act out a play",
+     "listening": "Listen to sequence a story",
+     "speaking": "Act out a play"
+    },
+    {
+     "n": 6,
+     "code": "6.6",
+     "title": "Writing",
+     "objective": "A story: use adjectives and adverbs",
+     "writing": "A story: use adjectives and adverbs"
+    },
+    {
+     "n": 7,
+     "code": "6.7",
+     "title": "Sounds and spelling",
+     "objective": "le or al ending /(ə)l/",
+     "phonics": "le or al ending /(ə)l/"
+    },
+    {
+     "n": 8,
+     "code": "6.8",
+     "title": "Think about it!",
+     "objective": "Play a storytelling game"
+    }
+   ]
+  },
+  {
+   "n": 7,
+   "title": "Technology time",
+   "pb_page": 82,
+   "vocabulary_topic": "Technology; inventions; possessive pronouns",
+   "wordlist": [
+    "machine",
+    "laptop",
+    "computers",
+    "theirs",
+    "paper",
+    "use",
+    "makes",
+    "project",
+    "download",
+    "work",
+    "very",
+    "can",
+    "earphones",
+    "mouse",
+    "invention",
+    "material",
+    "ink"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "7.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Technology; inventions; possessive pronouns",
+     "vocabulary": "Technology; inventions; possessive pronouns"
+    },
+    {
+     "n": 2,
+     "code": "7.2",
+     "title": "Grammar 1",
+     "objective": "Joining two sentences with who, where or which",
+     "grammar": "Joining two sentences with who, where or which: This is the man who invented the first computer."
+    },
+    {
+     "n": 3,
+     "code": "7.3",
+     "title": "Reading",
+     "objective": "An information website: relate to your own knowledge; working out the meaning of words",
+     "reading": "An information website: relate to your own knowledge; working out the meaning of words"
+    },
+    {
+     "n": 4,
+     "code": "7.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Use possessive pronouns",
+     "grammar": "Use possessive pronouns: Is that your camera? Yes, it's mine."
+    },
+    {
+     "n": 5,
+     "code": "7.5",
+     "title": "Listening & Speaking",
+     "objective": "Give a presentation",
+     "listening": "Listen for specific information",
+     "speaking": "Give a presentation"
+    },
+    {
+     "n": 6,
+     "code": "7.6",
+     "title": "Writing",
+     "objective": "An information text: include information",
+     "writing": "An information text: include information"
+    },
+    {
+     "n": 7,
+     "code": "7.7",
+     "title": "Sounds and spelling",
+     "objective": "Double letters",
+     "phonics": "Double letters"
+    },
+    {
+     "n": 8,
+     "code": "7.8",
+     "title": "Think about it!",
+     "objective": "Compare and contrast devices"
+    }
+   ],
+   "extras": "Reading time 3: The colours of life · Play 3: Vicky helps"
+  },
+  {
+   "n": 8,
+   "title": "Our world",
+   "pb_page": 96,
+   "vocabulary_topic": "Parts of plants and animals; things in nature; science and technology",
+   "wordlist": [
+    "will",
+    "won't",
+    "it'll",
+    "have",
+    "learn",
+    "eat",
+    "still"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "8.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Parts of plants and animals; things in nature; science and technology",
+     "vocabulary": "Parts of plants and animals; things in nature; science and technology"
+    },
+    {
+     "n": 2,
+     "code": "8.2",
+     "title": "Grammar 1",
+     "objective": "will / won't for future predictions",
+     "grammar": "will / won't for future predictions: It'll grow. It won't grow."
+    },
+    {
+     "n": 3,
+     "code": "8.3",
+     "title": "Reading",
+     "objective": "Poems: infer meaning; finding a word in a dictionary",
+     "reading": "Poems: infer meaning; finding a word in a dictionary"
+    },
+    {
+     "n": 4,
+     "code": "8.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Ask questions using will",
+     "grammar": "Ask questions using will: Will children still use books? No, they won't."
+    },
+    {
+     "n": 5,
+     "code": "8.5",
+     "title": "Listening & Speaking",
+     "objective": "Play a game",
+     "listening": "Listen to sequence information",
+     "speaking": "Play a game"
+    },
+    {
+     "n": 6,
+     "code": "8.6",
+     "title": "Writing",
+     "objective": "A poem: write a poem",
+     "writing": "A poem: write a poem"
+    },
+    {
+     "n": 7,
+     "code": "8.7",
+     "title": "Sounds and spelling",
+     "objective": "silent gh",
+     "phonics": "silent gh"
+    },
+    {
+     "n": 8,
+     "code": "8.8",
+     "title": "Think about it!",
+     "objective": "Predict the future of our world!"
+    }
+   ]
+  },
+  {
+   "n": 9,
+   "title": "Planet water",
+   "pb_page": 108,
+   "vocabulary_topic": "Using water; the water cycle; water verbs and adjectives",
+   "wordlist": [
+    "water",
+    "washing",
+    "machine",
+    "cools",
+    "melts",
+    "ice",
+    "cube",
+    "snow",
+    "heavy",
+    "white",
+    "turn",
+    "happens",
+    "tap",
+    "dishwasher",
+    "fill",
+    "cold",
+    "dissolves",
+    "floats",
+    "does",
+    "off",
+    "wheel",
+    "all",
+    "dirty",
+    "clothes",
+    "wash",
+    "plants",
+    "them",
+    "quiz",
+    "fresh",
+    "salt",
+    "rain",
+    "freezes",
+    "fridge",
+    "drink",
+    "snows",
+    "light",
+    "sounds",
+    "spelling",
+    "circled",
+    "save"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "9.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Using water; the water cycle; water verbs and adjectives",
+     "vocabulary": "Using water; the water cycle; water verbs and adjectives"
+    },
+    {
+     "n": 2,
+     "code": "9.2",
+     "title": "Grammar 1",
+     "objective": "Zero conditional",
+     "grammar": "Zero conditional: If it's warm, snow melts."
+    },
+    {
+     "n": 3,
+     "code": "9.3",
+     "title": "Reading",
+     "objective": "A factual text: interpret data; the importance of graphs",
+     "reading": "A factual text: interpret data; the importance of graphs"
+    },
+    {
+     "n": 4,
+     "code": "9.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "What happens if + present simple",
+     "grammar": "What happens if + present simple: What happens if you put the marble in the water? It sinks."
+    },
+    {
+     "n": 5,
+     "code": "9.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about how you use water",
+     "listening": "Listen for specific information",
+     "speaking": "Talk about how you use water"
+    },
+    {
+     "n": 6,
+     "code": "9.6",
+     "title": "Writing",
+     "objective": "Diagrams: write a factual report",
+     "writing": "Diagrams: write a factual report"
+    },
+    {
+     "n": 7,
+     "code": "9.7",
+     "title": "Sounds and spelling",
+     "objective": "silent letter h",
+     "phonics": "silent letter h"
+    },
+    {
+     "n": 8,
+     "code": "9.8",
+     "title": "Think about it!",
+     "objective": "Plan a campaign"
+    }
+   ],
+   "extras": "Reading time 4: Unusual hotels · Play 4: Freddy's music"
+  },
+  {
+   "n": 10,
+   "title": "Let's be detectives!",
+   "pb_page": 122,
+   "vocabulary_topic": "Physical descriptions; pronouns and detective words; around the house",
+   "wordlist": [
+    "hair",
+    "sandra",
+    "dark",
+    "curly",
+    "straight",
+    "jewellery",
+    "fair",
+    "earrings",
+    "ring",
+    "knock",
+    "antonio",
+    "maya",
+    "viktor",
+    "beard",
+    "bracelet",
+    "moustache",
+    "right",
+    "she's",
+    "wearing",
+    "sounds",
+    "spelling",
+    "silent",
+    "letters",
+    "hock",
+    "excuse",
+    "lamb",
+    "dad's",
+    "dad",
+    "plumber",
+    "sheep",
+    "called",
+    "nock",
+    "lives",
+    "here",
+    "fell",
+    "hurt",
+    "suggested",
+    "furniture",
+    "bought",
+    "haven't"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "10.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Physical descriptions; pronouns and detective words; around the house",
+     "vocabulary": "Physical descriptions; pronouns and detective words; around the house"
+    },
+    {
+     "n": 2,
+     "code": "10.2",
+     "title": "Grammar 1",
+     "objective": "Present perfect",
+     "grammar": "Present perfect: He's caught the thief. Oh no! He hasn't caught the thief!"
+    },
+    {
+     "n": 3,
+     "code": "10.3",
+     "title": "Reading",
+     "objective": "Emails: infer meaning; self-motivation",
+     "reading": "Emails: infer meaning; self-motivation"
+    },
+    {
+     "n": 4,
+     "code": "10.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Ask What's the matter? and make suggestions",
+     "grammar": "Ask What's the matter? and make suggestions: I'm really tired. Let's do something relaxing."
+    },
+    {
+     "n": 5,
+     "code": "10.5",
+     "title": "Listening & Speaking",
+     "objective": "Tell a convincing story",
+     "listening": "Listen to compare information",
+     "speaking": "Tell a convincing story"
+    },
+    {
+     "n": 6,
+     "code": "10.6",
+     "title": "Writing",
+     "objective": "A story: write a story",
+     "writing": "A story: write a story"
+    },
+    {
+     "n": 7,
+     "code": "10.7",
+     "title": "Sounds and spelling",
+     "objective": "silent letters b, w and k",
+     "phonics": "silent letters b, w and k"
+    },
+    {
+     "n": 8,
+     "code": "10.8",
+     "title": "Think about it!",
+     "objective": "Play the Are you a superstar? game"
+    }
+   ]
+  }
+ ]
+}

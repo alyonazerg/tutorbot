@@ -1,0 +1,852 @@
+{
+ "id": "academy_stars_2",
+ "title": "Academy Stars 2",
+ "level": "A1 (Pre A1 Starters)",
+ "audience": "дети",
+ "lesson_minutes": 45,
+ "note": "Списки собраны из словника рабочей тетради и воркшитов, распознаванием. Основа — тема юнита и грамматика; ИИ берёт лексику только отсюда.",
+ "units": [
+  {
+   "n": 1,
+   "title": "In the wild",
+   "pb_page": 8,
+   "vocabulary_topic": "Animals",
+   "wordlist": [
+    "bear",
+    "camel",
+    "crocodile",
+    "wolf",
+    "fox",
+    "tiger",
+    "forest",
+    "twenty",
+    "thirty",
+    "forty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+    "hundred",
+    "panda",
+    "china",
+    "kangaroo",
+    "numbers"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "1.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Animals",
+     "vocabulary": "Animals"
+    },
+    {
+     "n": 2,
+     "code": "1.2",
+     "title": "Grammar 1",
+     "objective": "There is/are + some/any",
+     "grammar": "There is/are + some/any: There are some crocodiles. There aren't any pandas."
+    },
+    {
+     "n": 3,
+     "code": "1.3",
+     "title": "Reading",
+     "objective": "An information text — find key facts",
+     "reading": "An information text — find key facts"
+    },
+    {
+     "n": 4,
+     "code": "1.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Are there any …? + short answers",
+     "grammar": "Are there any …? + short answers: Are there any birds? Yes, there are!"
+    },
+    {
+     "n": 5,
+     "code": "1.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about your favourite animal",
+     "listening": "Listen for gist",
+     "speaking": "Talk about your favourite animal"
+    },
+    {
+     "n": 6,
+     "code": "1.6",
+     "title": "Writing",
+     "objective": "An animal fact file — capital letters and full stops",
+     "writing": "An animal fact file — capital letters and full stops"
+    },
+    {
+     "n": 7,
+     "code": "1.7",
+     "title": "Phonics & learning skills",
+     "objective": "Short vowel sounds; identify patterns",
+     "phonics": "Short vowel sounds; identify patterns"
+    },
+    {
+     "n": 8,
+     "code": "1.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ],
+   "extras": "Review 1 (Cambridge Pre A1 Starters: Reading and Writing Part 3; Speaking Part 2) после юнита 2"
+  },
+  {
+   "n": 2,
+   "title": "My busy week",
+   "pb_page": 18,
+   "vocabulary_topic": "Days of the week; activities",
+   "wordlist": [
+    "wednesday",
+    "thursday",
+    "monday",
+    "tuesday",
+    "friday",
+    "saturday",
+    "sunday",
+    "music",
+    "lesson",
+    "basketball",
+    "cook",
+    "visit",
+    "football",
+    "grandma",
+    "karate",
+    "children"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "2.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Days of the week; activities",
+     "vocabulary": "Days of the week; activities"
+    },
+    {
+     "n": 2,
+     "code": "2.2",
+     "title": "Grammar 1",
+     "objective": "Present simple (I/we/they) affirmative and negative",
+     "grammar": "Present simple (I/we/they) affirmative and negative: I play basketball on Wednesday."
+    },
+    {
+     "n": 3,
+     "code": "2.3",
+     "title": "Reading",
+     "objective": "A poem — interpret graphics and identify rhymes",
+     "reading": "A poem — interpret graphics and identify rhymes"
+    },
+    {
+     "n": 4,
+     "code": "2.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Present simple",
+     "grammar": "Present simple: questions with Do you …? Do you play tennis?"
+    },
+    {
+     "n": 5,
+     "code": "2.5",
+     "title": "Listening & Speaking",
+     "objective": "Tell the time",
+     "listening": "Listen for key words",
+     "speaking": "Tell the time"
+    },
+    {
+     "n": 6,
+     "code": "2.6",
+     "title": "Writing",
+     "objective": "A description of a day — more capital letters",
+     "writing": "A description of a day — more capital letters"
+    },
+    {
+     "n": 7,
+     "code": "2.7",
+     "title": "Phonics & learning skills",
+     "objective": "cr, dr, gr; remember new words",
+     "phonics": "cr, dr, gr; remember new words"
+    },
+    {
+     "n": 8,
+     "code": "2.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ]
+  },
+  {
+   "n": 3,
+   "title": "Our things",
+   "pb_page": 30,
+   "vocabulary_topic": "Personal possessions",
+   "wordlist": [
+    "camera",
+    "computer",
+    "glasses",
+    "guitar",
+    "watch",
+    "children",
+    "tablet",
+    "headphones",
+    "photo",
+    "whose",
+    "radio",
+    "phone",
+    "cartoons",
+    "fruit",
+    "frog"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "3.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Personal possessions",
+     "vocabulary": "Personal possessions"
+    },
+    {
+     "n": 2,
+     "code": "3.2",
+     "title": "Grammar 1",
+     "objective": "Possessive adjectives",
+     "grammar": "Possessive adjectives: our/their: It's our camera."
+    },
+    {
+     "n": 3,
+     "code": "3.3",
+     "title": "Reading",
+     "objective": "An information text — identify fact and opinion",
+     "reading": "An information text — identify fact and opinion"
+    },
+    {
+     "n": 4,
+     "code": "3.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Questions with whose; 's for possession",
+     "grammar": "Questions with whose; 's for possession: Whose watch is this? It's Adam's."
+    },
+    {
+     "n": 5,
+     "code": "3.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about possessions",
+     "listening": "Listen for specific information",
+     "speaking": "Talk about possessions"
+    },
+    {
+     "n": 6,
+     "code": "3.6",
+     "title": "Writing",
+     "objective": "A description of a gadget — adjectives",
+     "writing": "A description of a gadget — adjectives"
+    },
+    {
+     "n": 7,
+     "code": "3.7",
+     "title": "Phonics & learning skills",
+     "objective": "br, fr, tr; verbs play and do",
+     "phonics": "br, fr, tr; verbs play and do"
+    },
+    {
+     "n": 8,
+     "code": "3.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ],
+   "extras": "Reading time 1: Our sweet mangoes · Think about it!: Make an activities poster"
+  },
+  {
+   "n": 4,
+   "title": "Out and about",
+   "pb_page": 44,
+   "vocabulary_topic": "Buildings; places",
+   "wordlist": [
+    "street",
+    "map",
+    "museum",
+    "woman",
+    "trampoline",
+    "flat",
+    "omar",
+    "door",
+    "restaurant",
+    "school",
+    "blue",
+    "flower"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "4.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Buildings; places",
+     "vocabulary": "Buildings; places"
+    },
+    {
+     "n": 2,
+     "code": "4.2",
+     "title": "Grammar 1",
+     "objective": "Present simple (he/she) affirmative and negative",
+     "grammar": "Present simple (he/she) affirmative and negative: She lives in a house."
+    },
+    {
+     "n": 3,
+     "code": "4.3",
+     "title": "Reading",
+     "objective": "A map — interpret text",
+     "reading": "A map — interpret text"
+    },
+    {
+     "n": 4,
+     "code": "4.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Present simple (he/she) Wh- questions",
+     "grammar": "Present simple (he/she) Wh- questions: Where does he live? What time does he start school?"
+    },
+    {
+     "n": 5,
+     "code": "4.5",
+     "title": "Listening & Speaking",
+     "objective": "Ask how to spell a word",
+     "listening": "Listen for gist",
+     "speaking": "Ask how to spell a word"
+    },
+    {
+     "n": 6,
+     "code": "4.6",
+     "title": "Writing",
+     "objective": "A profile of a friend — connect ideas with and, but",
+     "writing": "A profile of a friend — connect ideas with and, but"
+    },
+    {
+     "n": 7,
+     "code": "4.7",
+     "title": "Phonics & learning skills",
+     "objective": "bl, fl, pl; alphabetical order",
+     "phonics": "bl, fl, pl; alphabetical order"
+    },
+    {
+     "n": 8,
+     "code": "4.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ]
+  },
+  {
+   "n": 5,
+   "title": "Sun and snow",
+   "pb_page": 56,
+   "vocabulary_topic": "Weather; natural features",
+   "wordlist": [
+    "water",
+    "whale",
+    "children",
+    "mountain",
+    "warm",
+    "wearing",
+    "she's",
+    "going",
+    "skate",
+    "snow"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "5.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Weather; natural features",
+     "vocabulary": "Weather; natural features"
+    },
+    {
+     "n": 2,
+     "code": "5.2",
+     "title": "Grammar 1",
+     "objective": "Present continuous (affirmative and negative)",
+     "grammar": "Present continuous (affirmative and negative): I'm watching videos. They aren't swimming."
+    },
+    {
+     "n": 3,
+     "code": "5.3",
+     "title": "Reading",
+     "objective": "A play — order a story",
+     "reading": "A play — order a story"
+    },
+    {
+     "n": 4,
+     "code": "5.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Present continuous",
+     "grammar": "Present continuous: Wh- questions: What are you doing? What's he wearing?"
+    },
+    {
+     "n": 5,
+     "code": "5.5",
+     "title": "Listening & Speaking",
+     "objective": "Talk about the weather",
+     "listening": "Listen for key information",
+     "speaking": "Talk about the weather"
+    },
+    {
+     "n": 6,
+     "code": "5.6",
+     "title": "Writing",
+     "objective": "A scene for a play — exclamation marks",
+     "writing": "A scene for a play — exclamation marks"
+    },
+    {
+     "n": 7,
+     "code": "5.7",
+     "title": "Phonics & learning skills",
+     "objective": "sk, sm, sn, st; adjectives",
+     "phonics": "sk, sm, sn, st; adjectives"
+    },
+    {
+     "n": 8,
+     "code": "5.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ],
+   "extras": "Reading time 2: We can do anything! · Think about it!: Make an anemometer"
+  },
+  {
+   "n": 6,
+   "title": "Stay safe",
+   "pb_page": 70,
+   "vocabulary_topic": "Transport",
+   "wordlist": [
+    "helicopter",
+    "lorry",
+    "traffic",
+    "light",
+    "helmet",
+    "pavement",
+    "road",
+    "seat",
+    "belt",
+    "motorbike",
+    "bus",
+    "train",
+    "wear",
+    "walk",
+    "don",
+    "talk",
+    "sing",
+    "clap",
+    "floor",
+    "stairs",
+    "cloud",
+    "glue"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "6.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Transport",
+     "vocabulary": "Transport"
+    },
+    {
+     "n": 2,
+     "code": "6.2",
+     "title": "Grammar 1",
+     "objective": "Imperatives",
+     "grammar": "Imperatives: Stop! Don't run!"
+    },
+    {
+     "n": 3,
+     "code": "6.3",
+     "title": "Reading",
+     "objective": "A safety poster — apply information from text",
+     "reading": "A safety poster — apply information from text"
+    },
+    {
+     "n": 4,
+     "code": "6.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Present continuous",
+     "grammar": "Present continuous: questions + short answers: Are you playing a game? No, I'm not."
+    },
+    {
+     "n": 5,
+     "code": "6.5",
+     "title": "Listening & Speaking",
+     "objective": "Make requests",
+     "listening": "Listen for key information",
+     "speaking": "Make requests"
+    },
+    {
+     "n": 6,
+     "code": "6.6",
+     "title": "Writing",
+     "objective": "A list of classroom rules — more exclamation marks",
+     "writing": "A list of classroom rules — more exclamation marks"
+    },
+    {
+     "n": 7,
+     "code": "6.7",
+     "title": "Phonics & learning skills",
+     "objective": "cl, gl, sl; regular plurals",
+     "phonics": "cl, gl, sl; regular plurals"
+    },
+    {
+     "n": 8,
+     "code": "6.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ]
+  },
+  {
+   "n": 7,
+   "title": "Seasons of fun",
+   "pb_page": 82,
+   "vocabulary_topic": "Seasons; activities",
+   "wordlist": [
+    "spring",
+    "summer",
+    "autumn",
+    "picnic",
+    "snowman",
+    "flowers",
+    "jumper",
+    "machine",
+    "ski",
+    "leaf",
+    "leaves",
+    "lamb",
+    "sheep",
+    "children",
+    "cake",
+    "plane"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "7.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Seasons; activities",
+     "vocabulary": "Seasons; activities"
+    },
+    {
+     "n": 2,
+     "code": "7.2",
+     "title": "Grammar 1",
+     "objective": "like + -ing",
+     "grammar": "like + -ing: I like having picnics. I don't like swimming."
+    },
+    {
+     "n": 3,
+     "code": "7.3",
+     "title": "Reading",
+     "objective": "A story — identify the main idea",
+     "reading": "A story — identify the main idea"
+    },
+    {
+     "n": 4,
+     "code": "7.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Let's + infinitive; What about + -ing? Let's fly our kites!",
+     "grammar": "Let's + infinitive; What about + -ing? Let's fly our kites!"
+    },
+    {
+     "n": 5,
+     "code": "7.5",
+     "title": "Listening & Speaking",
+     "objective": "Accept or reject suggestions",
+     "listening": "Listen for specific information",
+     "speaking": "Accept or reject suggestions"
+    },
+    {
+     "n": 6,
+     "code": "7.6",
+     "title": "Writing",
+     "objective": "A brochure about a country — headings",
+     "writing": "A brochure about a country — headings"
+    },
+    {
+     "n": 7,
+     "code": "7.7",
+     "title": "Phonics & learning skills",
+     "objective": "long a; complete a table",
+     "phonics": "long a; complete a table"
+    },
+    {
+     "n": 8,
+     "code": "7.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ],
+   "extras": "Reading time 3: The island · Think about it!: Make a season poster"
+  },
+  {
+   "n": 8,
+   "title": "How food grows",
+   "pb_page": 96,
+   "vocabulary_topic": "Fruits; vegetables",
+   "wordlist": [
+    "beans",
+    "coconut",
+    "grapes",
+    "watermelon",
+    "pepper",
+    "strawberry",
+    "market",
+    "vegetables",
+    "eva",
+    "i'd",
+    "fruit",
+    "lemon",
+    "tomatoes",
+    "man",
+    "owen",
+    "thanks",
+    "henry",
+    "peas",
+    "orange",
+    "feed",
+    "tractor",
+    "mice",
+    "white",
+    "rice"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "8.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Fruits; vegetables",
+     "vocabulary": "Fruits; vegetables"
+    },
+    {
+     "n": 2,
+     "code": "8.2",
+     "title": "Grammar 1",
+     "objective": "would like + a/an/some",
+     "grammar": "would like + a/an/some: I'd like some lemons. Would you like a watermelon?"
+    },
+    {
+     "n": 3,
+     "code": "8.3",
+     "title": "Reading",
+     "objective": "An information text — understand sequence",
+     "reading": "An information text — understand sequence"
+    },
+    {
+     "n": 4,
+     "code": "8.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "would like + to + infinitive",
+     "grammar": "would like + to + infinitive: Would you like to feed the lambs?"
+    },
+    {
+     "n": 5,
+     "code": "8.5",
+     "title": "Listening & Speaking",
+     "objective": "Ask for things in a shop or market",
+     "listening": "Listen for specific information",
+     "speaking": "Ask for things in a shop or market"
+    },
+    {
+     "n": 6,
+     "code": "8.6",
+     "title": "Writing",
+     "objective": "A party invitation — commas",
+     "writing": "A party invitation — commas"
+    },
+    {
+     "n": 7,
+     "code": "8.7",
+     "title": "Phonics & learning skills",
+     "objective": "long i; irregular plurals",
+     "phonics": "long i; irregular plurals"
+    },
+    {
+     "n": 8,
+     "code": "8.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ]
+  },
+  {
+   "n": 9,
+   "title": "Let's look inside",
+   "pb_page": 108,
+   "vocabulary_topic": "Rooms; furniture",
+   "wordlist": [
+    "living",
+    "room",
+    "space",
+    "towel",
+    "castle",
+    "lake",
+    "shower",
+    "kitchen",
+    "bathroom",
+    "hall",
+    "bookcase",
+    "there's",
+    "ell",
+    "here",
+    "livingroom",
+    "wasn"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "9.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Rooms; furniture",
+     "vocabulary": "Rooms; furniture"
+    },
+    {
+     "n": 2,
+     "code": "9.2",
+     "title": "Grammar 1",
+     "objective": "Past simple (was/were)",
+     "grammar": "Past simple (was/were): I was with grandma. We weren't hungry."
+    },
+    {
+     "n": 3,
+     "code": "9.3",
+     "title": "Reading",
+     "objective": "A realistic story — read for detail",
+     "reading": "A realistic story — read for detail"
+    },
+    {
+     "n": 4,
+     "code": "9.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Past simple to be",
+     "grammar": "Past simple to be: questions + short answers: Were you at home yesterday? Yes, I was."
+    },
+    {
+     "n": 5,
+     "code": "9.5",
+     "title": "Listening & Speaking",
+     "objective": "Tell the time (half past)",
+     "listening": "Listen for sequence",
+     "speaking": "Tell the time (half past)"
+    },
+    {
+     "n": 6,
+     "code": "9.6",
+     "title": "Writing",
+     "objective": "An email about yesterday — start and end an email",
+     "writing": "An email about yesterday — start and end an email"
+    },
+    {
+     "n": 7,
+     "code": "9.7",
+     "title": "Phonics & learning skills",
+     "objective": "long o and u; alphabetical order",
+     "phonics": "long o and u; alphabetical order"
+    },
+    {
+     "n": 8,
+     "code": "9.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ],
+   "extras": "Reading time 4: The prince who wasn't hungry · Think about it!: Design a space house"
+  },
+  {
+   "n": 10,
+   "title": "Fantastic weekends",
+   "pb_page": 122,
+   "vocabulary_topic": "Recreational places in a town",
+   "wordlist": [
+    "aquarium",
+    "gallery",
+    "skate",
+    "park",
+    "theme",
+    "pyjamas",
+    "sleeping",
+    "bag",
+    "rock",
+    "shell",
+    "water",
+    "morning",
+    "afternoon",
+    "evening",
+    "beach",
+    "ride",
+    "night",
+    "museum",
+    "day",
+    "fun",
+    "bowling",
+    "alley",
+    "concert",
+    "henry",
+    "kirsty",
+    "eva",
+    "visited"
+   ],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "10.1",
+     "title": "Vocabulary",
+     "objective": "Ввести лексику юнита: Recreational places in a town",
+     "vocabulary": "Recreational places in a town"
+    },
+    {
+     "n": 2,
+     "code": "10.2",
+     "title": "Grammar 1",
+     "objective": "Past simple (regular verbs)",
+     "grammar": "Past simple (regular verbs): I visited the zoo. They cooked."
+    },
+    {
+     "n": 3,
+     "code": "10.3",
+     "title": "Reading",
+     "objective": "A story — understand sequence and word meaning from context",
+     "reading": "A story — understand sequence and word meaning from context"
+    },
+    {
+     "n": 4,
+     "code": "10.4",
+     "title": "Grammar 2 / Language in use",
+     "objective": "Wh- questions + answers with past simple regular verbs",
+     "grammar": "Wh- questions + answers with past simple regular verbs: Where were you on Saturday?"
+    },
+    {
+     "n": 5,
+     "code": "10.5",
+     "title": "Listening & Speaking",
+     "objective": "Ask and answer about the weekend",
+     "listening": "Listen for specific information",
+     "speaking": "Ask and answer about the weekend"
+    },
+    {
+     "n": 6,
+     "code": "10.6",
+     "title": "Writing",
+     "objective": "A description of the weekend — time expressions",
+     "writing": "A description of the weekend — time expressions"
+    },
+    {
+     "n": 7,
+     "code": "10.7",
+     "title": "Phonics & learning skills",
+     "objective": "long e; opposites",
+     "phonics": "long e; opposites"
+    },
+    {
+     "n": 8,
+     "code": "10.8",
+     "title": "Review",
+     "objective": "Повторение лексики и грамматики юнита"
+    }
+   ]
+  }
+ ]
+}

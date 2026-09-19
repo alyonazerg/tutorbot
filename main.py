@@ -33,7 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 
 TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 OWNER_ID = int(os.environ.get("TG_OWNER_ID", "0") or 0)
@@ -104,6 +104,7 @@ HELP = (
     "/week — расписание на неделю\n"
     "/archive — архив учеников\n"
     "/money — траты, доходы и кредиты\n"
+    "/notes — напоминания и заметки\n"
     "/month — итоги месяца\n"
     "/export — выгрузка в CSV\n"
     "/id — ваш Telegram ID"
@@ -410,6 +411,16 @@ CREATE TABLE IF NOT EXISTS credits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT, balance REAL, rate REAL, min_pay REAL, fee REAL DEFAULT 0,
     pay_day INTEGER, closed INTEGER DEFAULT 0, created TEXT);
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER, text TEXT, file_id TEXT, file_kind TEXT, file_name TEXT,
+    due TEXT, repeat TEXT, done INTEGER DEFAULT 0, created TEXT);
+CREATE TABLE IF NOT EXISTS audio (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT, code TEXT, track TEXT, file_id TEXT, kind TEXT, name TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS materials_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book TEXT, code TEXT, kind TEXT, body TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -432,6 +443,10 @@ MIGRATIONS = [
     ("words", "coll", "TEXT"),
     ("words", "example", "TEXT"),
     ("students", "level", "TEXT"),
+    ("students", "quiet", "INTEGER DEFAULT 0"),
+    ("students", "book", "TEXT"),
+    ("students", "unit", "INTEGER"),
+    ("students", "lesson", "INTEGER"),
     ("students", "keys", "INTEGER DEFAULT 0"),
     ("lessons", "reason", "TEXT"),
     ("payments", "receipt", "TEXT"),
@@ -949,7 +964,7 @@ def screen_students(chat_id):
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
     rows.append([("📚 Мой словарь", "myw"), ("💰 Деньги", "money")])
-    rows.append([("💌 Визитка", "promo_me")])
+    rows.append([("⏰ Напоминания", "notes"), ("💌 Визитка", "promo_me")])
     rows.append([("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
@@ -1013,8 +1028,12 @@ def screen_student(sid):
     if s["tg_user_id"]:
         lines.append("Ученик подключён к боту ✅")
 
+    if book_of(sid):
+        lines.append("📕 {}".format(esc(lesson_label(sid))))
     rows = [
         [("✅ Провела", "done:%d" % sid), ("💰 Оплата", "pay:%d" % sid)],
+        [("📕 {}".format(lesson_label(sid).split(" · ")[-1][:26] if book_of(sid)
+                         else "Учебник"), "book:%d" % sid)],
         [("🔥 Warm-up", "warm:%d" % sid), ("📝 Домашка", "hw:%d" % sid)],
         [("🗓 Занятия", "schedm:%d" % sid), ("📚 Учёба", "studym:%d" % sid)],
         [("📤 Ученику", "share:%d" % sid), ("⚙️ Ещё", "more:%d" % sid)],
@@ -1055,6 +1074,67 @@ def screen_study_menu(sid):
         [("📊 Сводка за неделю", "report:%d" % sid)],
         [("📈 Прогресс", "prog:%d" % sid), ("💬 Отзывы", "fb:%d" % sid)],
         [("⬅️ Назад", "st:%d" % sid)]]
+
+
+def screen_book(sid):
+    s = sget(sid)
+    b = book_of(sid)
+    if not b:
+        rows = [[(bk["title"], "bk_set:%d:%s" % (sid, bid))] for bid, bk in BOOKS.items()]
+        if not rows:
+            return ("📕 Учебников не загружено. Положите файлы карт в папку "
+                    "<code>books/</code> рядом с кодом.", [[("⬅️ Назад", "st:%d" % sid)]])
+        return ("📕 <b>Учебник для {}</b>\n\nВыберите, по какому занимаетесь.".format(
+            esc(s["name"])), rows + [[("⬅️ Назад", "st:%d" % sid)]])
+    un, ln = s["unit"] or 1, s["lesson"] or 1
+    u, l = unit_of(b, un), lesson_of(b, un, ln)
+    lines = ["📕 <b>{}</b> · {} мин".format(esc(b["title"]), b.get("lesson_minutes", 60)), ""]
+    if u and l:
+        lines += ["Юнит {}: <b>{}</b>".format(u["n"], esc(u["title"])),
+                  "Урок <b>{} {}</b>".format(l["code"], esc(l["title"])),
+                  "Цель: {}".format(esc(l.get("objective", "—")))]
+        for key, name in (("grammar", "Грамматика"), ("vocabulary", "Лексика"),
+                          ("functional", "Функциональный язык"), ("writing", "Письмо"),
+                          ("speaking", "Говорение"), ("phonics", "Фонетика")):
+            if l.get(key):
+                lines.append("{}: {}".format(name, esc(l[key])))
+        if l.get("wb_page"):
+            lines.append("Тетрадь: стр. {}".format(l["wb_page"]))
+        if l.get("tracks"):
+            have = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code=?",
+                     (b["id"], l["code"]), one=True)["c"]
+            lines.append("Аудио: {}{}".format(", ".join(l["tracks"]),
+                                              " ✅" if have else " (не загружено)"))
+    rows = [[("🗂 План урока", "bk_go:%d:plan" % sid), ("🔥 Разминка", "bk_go:%d:warm" % sid)],
+            [("🧩 Упражнения", "bk_go:%d:ex" % sid), ("📝 Домашка", "bk_go:%d:hw" % sid)],
+            [("➕ Доп. лексика", "bk_go:%d:voc" % sid)],
+            [("◀️ Урок", "bk_prev:%d" % sid), ("▶️ Урок", "bk_next:%d" % sid)],
+            [("📚 Выбрать урок", "bk_pick:%d:%d" % (sid, un)),
+             ("📕 Сменить учебник", "bk_reset:%d" % sid)],
+            [("⬅️ Назад", "st:%d" % sid)]]
+    return "\n".join(lines), rows
+
+
+def screen_book_pick(sid, un=0):
+    b = book_of(sid)
+    if not b:
+        return screen_book(sid)
+    if not un:
+        rows = []
+        line = []
+        for u in b["units"]:
+            line.append(("{}. {}".format(u["n"], u["title"][:16]), "bk_pick:%d:%d" % (sid, u["n"])))
+            if len(line) == 2:
+                rows.append(line); line = []
+        if line:
+            rows.append(line)
+        return ("📚 <b>{}</b> — выберите юнит".format(esc(b["title"])),
+                rows + [[("⬅️ Назад", "book:%d" % sid)]])
+    u = unit_of(b, un)
+    rows = [[("{} {}".format(l["code"], l["title"][:24]), "bk_lset:%d:%d:%d" % (sid, un, l["n"]))]
+            for l in u["lessons"]]
+    return ("📚 <b>Юнит {}: {}</b>\n\nВыберите урок.".format(u["n"], esc(u["title"])),
+            rows + [[("⬅️ К юнитам", "bk_pick:%d:0" % sid)]])
 
 
 def screen_warm(sid):
@@ -1101,7 +1181,11 @@ def screen_after(sid, lid):
     if not s["tg_user_id"]:
         lines += ["", "<i>Ученик не подключён к боту — уведомления ему не уйдут.</i>"]
     rows = [[("✍️ Тема занятия", "note:%d:%d" % (sid, lid))],
-            [("📝 Задать домашку", "afterhw:%d:%d" % (sid, lid))],
+            [("📝 Задать домашку", "afterhw:%d:%d" % (sid, lid))]]
+    if book_of(sid):
+        lines.append("Следующий урок: {}".format(esc(lesson_label(sid).split(" · ", 1)[-1])))
+        rows.append([("📕 Материалы к следующему уроку", "book:%d" % sid)])
+    rows += [
             [("📚 Добавить слова с урока", "afterw:%d:%d" % (sid, lid))],
             [("👤 К карточке", "st:%d" % sid), ("⬅️ К ученикам", "menu")]]
     return "\n".join(lines), rows
@@ -1525,6 +1609,36 @@ def ai_format_raw(sid, limit=15, items=None):
     terms = "\n".join("{}. {}{}".format(
         i + 1, w["term"], " = " + w["translation"] if w["translation"] else "")
         for i, w in enumerate(items))
+    s_ = sget(sid)
+    simple = bool(s_["is_guest"]) or (s_["access"] or "full") == "kid"
+    if simple:
+        prompt = (
+            "Ты помогаешь школьнику вести словарь английского.\n"
+            "Список (слово, иногда с переводом через знак =):\n{}\n\n"
+            "Слово может быть на английском или на русском. Исправь опечатку, приведи "
+            "к начальной форме, подбери самый простой и частотный перевод.\n"
+            "Для каждой строки верни объект: n (номер строки), term (английское слово), "
+            "translation (перевод на русский, одно-два слова)."
+        ).format(terms)
+        data = ai_json(prompt, max_tokens=60 * len(items) + 300, kind="cards", sid=sid)
+        if not isinstance(data, list):
+            return 0, "ИИ не ответил или вернул непонятный формат. Подробности: /ai"
+        done = 0
+        for i, obj in enumerate(data):
+            if not isinstance(obj, dict):
+                continue
+            try:
+                k = int(obj.get("n", 0)) - 1
+            except (TypeError, ValueError):
+                k = i
+            src = items[k] if 0 <= k < len(items) else None
+            if src is None:
+                continue
+            run("UPDATE words SET term=?, translation=?, raw=0, due=? WHERE id=?",
+                (str(obj.get("term") or src["term"])[:80],
+                 str(obj.get("translation") or "")[:120], today().isoformat(), src["id"]))
+            done += 1
+        return done, "" if done else "ИИ вернул пустой список. Подробности: /ai"
     prompt = (
         "Ты составляешь словарные карточки для преподавателя английского. "
         "Уровень владения языком: {}, поэтому определения и примеры должны быть "
@@ -2119,6 +2233,299 @@ def text_next_lesson(sid):
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------- Учебники
+
+BOOKS_DIR = os.environ.get("TG_BOOKS_DIR", os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "books"))
+BOOKS = {}
+
+
+def load_books():
+    """Читает карты учебников из папки books рядом с кодом."""
+    BOOKS.clear()
+    if not os.path.isdir(BOOKS_DIR):
+        return BOOKS
+    for fn in sorted(os.listdir(BOOKS_DIR)):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(BOOKS_DIR, fn), encoding="utf-8") as f:
+                b = json.load(f)
+            if b.get("id") and b.get("units"):
+                BOOKS[b["id"]] = b
+        except Exception as e:
+            print("Не прочитался учебник", fn, e)
+    return BOOKS
+
+
+def book_of(sid):
+    s = sget(sid)
+    return BOOKS.get(s["book"] or "")
+
+
+def unit_of(book, un):
+    return next((u for u in book["units"] if u["n"] == un), None)
+
+
+def lesson_of(book, un, ln):
+    u = unit_of(book, un)
+    if not u:
+        return None
+    return next((l for l in u["lessons"] if l["n"] == ln), None)
+
+
+def lesson_label(sid):
+    """«Evolve 4 · Unit 3 · 3.2 Is It Worth It?» — для карточки ученика."""
+    b = book_of(sid)
+    if not b:
+        return ""
+    s = sget(sid)
+    l = lesson_of(b, s["unit"] or 1, s["lesson"] or 1)
+    u = unit_of(b, s["unit"] or 1)
+    if not l or not u:
+        return b["title"]
+    return "{} · {} · {} {}".format(b["title"], u["title"], l["code"], l["title"])
+
+
+def lesson_brief(b, un, ln):
+    """Всё, что известно про урок — идёт в промпт и в план."""
+    u, l = unit_of(b, un), lesson_of(b, un, ln)
+    if not u or not l:
+        return ""
+    bits = ["Учебник: {} (уровень {}), занятие {} минут.".format(
+        b["title"], b.get("level", "—"), b.get("lesson_minutes", 60)),
+        "Юнит {}: {}. Урок {} — {}.".format(u["n"], u["title"], l["code"], l["title"]),
+        "Цель урока: {}".format(l.get("objective", ""))]
+    for key, name in (("grammar", "Грамматика"), ("vocabulary", "Лексика"),
+                      ("functional", "Функциональный язык"), ("reading", "Чтение"),
+                      ("listening", "Аудирование"), ("speaking", "Говорение"),
+                      ("writing", "Письмо"), ("phonics", "Фонетика")):
+        if l.get(key):
+            bits.append("{}: {}".format(name, l[key]))
+    if u.get("pron"):
+        bits.append("Произношение юнита: {}".format("; ".join(u["pron"])))
+    wl = u.get("wordlist") or []
+    if wl:
+        bits.append("ЛЕКСИКА ЮНИТА (использовать только эти слова и словосочетания): "
+                    + ", ".join(wl[:90]))
+    elif u.get("vocabulary_topic"):
+        bits.append("Лексическая тема юнита: {}".format(u["vocabulary_topic"]))
+    if l.get("wb_page"):
+        bits.append("Рабочая тетрадь: страница {}{}".format(
+            l["wb_page"], " (" + ", ".join(l.get("wb_sections", [])) + ")"
+            if l.get("wb_sections") else ""))
+    if u.get("video"):
+        bits.append("Видео юнита: {}".format(u["video"]["title"]))
+    if l.get("tracks"):
+        bits.append("Аудиотреки урока: {}".format(", ".join(l["tracks"])))
+    return "\n".join(bits)
+
+
+def cache_get(book, code, kind):
+    r = q("SELECT body FROM materials_cache WHERE book=? AND code=? AND kind=? "
+          "ORDER BY id DESC LIMIT 1", (book, code, kind), one=True)
+    return r["body"] if r else None
+
+
+def cache_put(book, code, kind, body):
+    run("INSERT INTO materials_cache (book, code, kind, body, created) VALUES (?,?,?,?,?)",
+        (book, code, kind, body, today().isoformat()))
+
+
+BOOK_KINDS = {
+    "plan": ("🗂 План урока", "Составь краткий план занятия: этапы с таймингом на всё занятие, "
+             "что делает преподаватель и что ученик, какие страницы учебника и тетради "
+             "использовать. Уложись в отведённые минуты. Без воды, по пунктам."),
+    "warm": ("🔥 Разминка", "Составь разминку на 5–7 минут к этому уроку: два вопроса для "
+             "устного старта, шесть предложений gap-fill (пропуск ______) на лексике юнита, "
+             "четыре предложения на грамматику урока и ключи."),
+    "ex": ("🧩 Упражнения", "Составь три упражнения по этому уроку: на лексику юнита, "
+           "на грамматику урока и одно на говорение. К каждому — инструкция для ученика "
+           "и ключи."),
+    "hw": ("📝 Домашка", "Предложи домашнее задание к этому уроку: что задать из рабочей "
+           "тетради (страница и разделы) и одно короткое задание от себя на закрепление. "
+           "Напиши текст задания так, чтобы его можно было отправить ученику как есть."),
+    "voc": ("➕ Доп. лексика", "Подбери восемь дополнительных единиц по теме урока строго под "
+            "уровень: коллокации, устойчивые выражения, а для уровня B1 и выше — идиомы и "
+            "поговорки. Для каждой: единица — перевод на русский — пример предложения. "
+            "Формат строк: единица | перевод | пример. Ничего лишнего."),
+}
+
+
+def ai_book_material(sid, kind, force=False):
+    """Материал по текущему уроку учебника. Возвращает (текст, промпт, из кэша)."""
+    b = book_of(sid)
+    if not b:
+        return None, "", False
+    s = sget(sid)
+    un, ln = s["unit"] or 1, s["lesson"] or 1
+    l = lesson_of(b, un, ln)
+    if not l:
+        return None, "", False
+    code = "{}:{}".format(b["id"], l["code"])
+    if not force:
+        got = cache_get(b["id"], l["code"], kind)
+        if got:
+            return got, "", True
+    title, task = BOOK_KINDS[kind]
+    extra = ""
+    if kind in ("warm", "ex", "voc"):
+        ws = [w["term"] for w in ex_words(sid, 8)]
+        if ws:
+            extra = "\nСлова ученика из его личного словаря: {}.".format(", ".join(ws))
+    prompt = ("Ты опытный преподаватель английского, готовишь материал к занятию.\n\n"
+              "{}\n\nУченик: уровень {}.{}\n\n{}\n\n"
+              "Правила: лексику бери только из лексики юнита, новые слова вводи лишь если "
+              "задание прямо про дополнительную лексику; английский естественный; "
+              "без markdown-звёздочек; сразу материал, без вступлений."
+              ).format(lesson_brief(b, un, ln), level_of(sid), extra, task)
+    out = ai_complete(prompt, max_tokens=2200, kind="book:" + kind, sid=sid)
+    if out:
+        cache_put(b["id"], l["code"], kind, out)
+    return out, prompt, False
+
+
+# --------------------------------------------------------------- Напоминания
+
+WD_NAMES = {"понедельник": 0, "вторник": 1, "среда": 2, "среду": 2, "четверг": 3,
+            "пятница": 4, "пятницу": 4, "суббота": 5, "субботу": 5,
+            "воскресенье": 6, "пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4,
+            "сб": 5, "вс": 6}
+
+
+def parse_when(text, base=None):
+    """«через 2 часа», «завтра в 10», «25.09 18:00», «в пятницу» → datetime или None."""
+    t = text.lower().strip()
+    now = base or datetime.now()
+    m = re.search(r"через\s+(\d+)\s*(мин|час|дн|нед)", t)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        return now + {"мин": timedelta(minutes=n), "час": timedelta(hours=n),
+                      "дн": timedelta(days=n), "нед": timedelta(weeks=n)}[unit]
+
+    day = None
+    dm = re.search(r"\b(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\b", t)
+    if dm:
+        y = int(dm.group(3) or now.year)
+        y = y + 2000 if y < 100 else y
+        try:
+            day = date(y, int(dm.group(2)), int(dm.group(1)))
+            t = t.replace(dm.group(0), " ")
+        except ValueError:
+            day = None
+
+    hour = minute = None
+    hm = re.search(r"\b(\d{1,2})[:.](\d{2})\b", t)
+    if hm and int(hm.group(1)) <= 23 and int(hm.group(2)) <= 59:
+        hour, minute = int(hm.group(1)), int(hm.group(2))
+    else:
+        hm2 = re.search(r"\bв\s+(\d{1,2})\b", t)
+        if hm2 and int(hm2.group(1)) <= 23:
+            hour, minute = int(hm2.group(1)), 0
+
+    if day is None:
+        if "послезавтра" in t:
+            day = now.date() + timedelta(days=2)
+        elif "завтра" in t:
+            day = now.date() + timedelta(days=1)
+        elif "сегодня" in t or "вечером" in t or "утром" in t:
+            day = now.date()
+        else:
+            for name, wd in WD_NAMES.items():
+                if re.search(r"\b{}\b".format(name), t):
+                    day = now.date() + timedelta(days=(wd - now.weekday()) % 7 or 7)
+                    break
+
+    if hour is None:
+        if "утром" in t:
+            hour, minute = 9, 0
+        elif "вечером" in t:
+            hour, minute = 19, 0
+    if day is None and hour is None:
+        return None
+    if hour is None:
+        hour, minute = 9, 0
+    when = datetime.combine(day or now.date(), dtime(hour, minute))
+    if when <= now:
+        when += timedelta(days=1) if day is None else timedelta(days=365)
+    return when
+
+
+def note_repeat(text):
+    t = text.lower()
+    if "каждый день" in t or "ежедневно" in t:
+        return "daily"
+    if "каждую неделю" in t or "еженедельно" in t or "каждый понедельник" in t:
+        return "weekly"
+    if "каждый месяц" in t or "ежемесячно" in t:
+        return "monthly"
+    return None
+
+
+def note_save(chat_id, text, when, file_id=None, file_kind=None, file_name=None):
+    return run("INSERT INTO notes (chat_id, text, file_id, file_kind, file_name, due, "
+               "repeat, done, created) VALUES (?,?,?,?,?,?,?,0,?)",
+               (chat_id, text[:1500], file_id, file_kind, file_name,
+                when.isoformat(timespec="minutes"), note_repeat(text),
+                datetime.now().isoformat(timespec="seconds")))
+
+
+def fmt_when(iso):
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%dT%H:%M")
+    except ValueError:
+        return iso
+    day = "сегодня" if d.date() == today() else (
+        "завтра" if d.date() == today() + timedelta(days=1) else fmt_date(d.date(), True))
+    return "{} в {:02d}:{:02d}".format(day, d.hour, d.minute)
+
+
+def screen_notes(chat_id):
+    rows_ = q("SELECT * FROM notes WHERE chat_id=? AND done=0 ORDER BY due LIMIT 20",
+              (chat_id,))
+    lines = ["⏰ <b>Напоминания</b>", ""]
+    if not rows_:
+        lines += ["Пока пусто.", "",
+                  "Можно писать прямо сюда: <code>напомни завтра в 10 позвонить в клинику</code>",
+                  "Или прислать файл или ссылку с подписью «напомни в пятницу»."]
+    btns = []
+    for r_ in rows_:
+        mark = "🔁 " if r_["repeat"] else ""
+        clip = "📎 " if r_["file_id"] else ""
+        lines.append("{}{}<b>{}</b> — {}".format(
+            mark, clip, fmt_when(r_["due"]), esc((r_["text"] or r_["file_name"] or "")[:60])))
+        btns.append([(("{} {}".format(fmt_when(r_["due"]),
+                                      (r_["text"] or r_["file_name"] or "")[:20])),
+                      "nt_item:%d" % r_["id"])])
+    return "\n".join(lines), btns + [[("➕ Новое", "nt_add")], [("⬅️ К ученикам", "menu")]]
+
+
+def notes_job():
+    """Отправляет напоминания, у которых подошло время."""
+    now = datetime.now().isoformat(timespec="minutes")
+    for r_ in q("SELECT * FROM notes WHERE done=0 AND due<=? ORDER BY due LIMIT 20", (now,)):
+        head = "⏰ <b>Напоминание</b>\n\n{}".format(esc(r_["text"] or ""))
+        if r_["file_id"]:
+            tg("sendDocument" if r_["file_kind"] == "doc" else "sendPhoto",
+               chat_id=r_["chat_id"],
+               **{("document" if r_["file_kind"] == "doc" else "photo"): r_["file_id"]},
+               caption=(r_["text"] or "")[:1000])
+            send(r_["chat_id"], head, [[("✅ Готово", "nt_done:%d" % r_["id"])]])
+        else:
+            send(r_["chat_id"], head, [[("✅ Готово", "nt_done:%d" % r_["id"]),
+                                        ("🔁 Через час", "nt_snooze:%d" % r_["id"])]])
+        if r_["repeat"]:
+            d = datetime.strptime(r_["due"], "%Y-%m-%dT%H:%M")
+            step = {"daily": timedelta(days=1), "weekly": timedelta(weeks=1),
+                    "monthly": timedelta(days=30)}[r_["repeat"]]
+            while d <= datetime.now():
+                d += step
+            run("UPDATE notes SET due=? WHERE id=?",
+                (d.isoformat(timespec="minutes"), r_["id"]))
+        else:
+            run("UPDATE notes SET done=1 WHERE id=?", (r_["id"],))
+
+
 # -------------------------------------------------------------------- Деньги
 
 MONEY_RE = re.compile(r"^([+\-]?)\s*([\d][\d \u00a0]*(?:[.,]\d{1,2})?)\s*(?:р|руб|₽)?\s*"
@@ -2186,6 +2593,16 @@ def fin_category(titles):
     for t in titles:
         out.setdefault(t, "Прочее")
     return out
+
+
+def fin_income(amount, title, d=None, category="Занятия"):
+    """Записывает поступление в бюджет (например, оплату ученика)."""
+    if not amount:
+        return
+    run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
+        "VALUES (?,?,?,?,?,?)",
+        ((d or today()).isoformat(), "income", float(amount), title[:60], category,
+         datetime.now().isoformat(timespec="seconds")))
 
 
 def fin_add(lines, d=None, force=None):
@@ -2315,7 +2732,7 @@ def screen_fin_day(d=None):
     btns = []
     for r_ in rows_:
         lines.append("{} {} — {} · <i>{}</i>".format(
-            "➕" if r_["kind"] == "income" else "•", money(r_["amount"]),
+            "➕" if r_["kind"] == "income" else "➖", money(r_["amount"]),
             esc(r_["title"]), r_["category"]))
         btns.append([("{} {}".format(money(r_["amount"]), r_["title"][:16]),
                       "fin_item:%d" % r_["id"])])
@@ -2328,7 +2745,7 @@ def screen_fin_item(tid):
         return "Запись не найдена.", [[("⬅️ Назад", "fin_day")]]
     text = "{} <b>{}</b> — {}\nКатегория: <b>{}</b>\n\nМожно поменять категорию — " \
            "запомню её и для следующих трат в этом месте.".format(
-               "➕" if r_["kind"] == "income" else "•", esc(r_["title"]),
+               "➕" if r_["kind"] == "income" else "➖", esc(r_["title"]),
                money(r_["amount"]), r_["category"])
     cats, row = [], []
     for c in FIN_CATS:
@@ -2666,7 +3083,8 @@ def pet_jobs():
                                     esc(p["name"]), p["emoji"], p["title"]),
                            [[("🎁 Потратить", "lrn_ex:%d" % sid)],
                             [("Посмотреть питомца", "lrn_pet:%d" % sid)]])
-        if not PET_REMIND_HOUR or now.hour < PET_REMIND_HOUR or now.hour >= 22:
+        if s["quiet"] or not PET_REMIND_HOUR or now.hour < PET_REMIND_HOUR \
+                or now.hour >= 22:
             continue
         rkey = "petrem:%d" % sid
         if meta_get(rkey) == today().isoformat() or p["fed"]:
@@ -2782,7 +3200,9 @@ def screen_words_menu(sid):
 def screen_more_menu(sid):
     s = sget(sid)
     rows = [[("💳 Оплата", "lrn_pay:%d" % sid), ("🗓 Все даты", "lrn_when:%d" % sid)],
-            [("💬 Отзыв преподавателю", "lrn_fb:%d" % sid)]]
+            [("💬 Отзыв преподавателю", "lrn_fb:%d" % sid)],
+            [("🔔 Напоминания: {}".format("выкл" if s["quiet"] else "вкл"),
+              "lrn_quiet:%d" % sid)]]
     if s["keys"]:
         rows.append([("🔑 Открыть бонус ({})".format(s["keys"]), "lrn_key:%d" % sid)])
     rows += [[("💌 Поделиться ботом", "lrn_promo:%d" % sid)],
@@ -2804,7 +3224,8 @@ def card_back(w, pro=False):
                     lambda m: "<b>{}</b>".format(m.group(0)), esc(w["example"]))
         lines += ["", "<i>Ex:</i> {}".format(ex)]
     if w["translation"]:
-        lines += ["", "🇷🇺 {}".format(esc(w["translation"]))]
+        lines += ["", "🇷🇺 <tg-spoiler>{}</tg-spoiler>".format(esc(w["translation"]))
+                  if pro else "🇷🇺 {}".format(esc(w["translation"]))]
     return "\n".join(lines)
 
 
@@ -2819,7 +3240,8 @@ def screen_card(sid, word, show=False):
                 [[("{} Питомец".format(p["face"]), "lrn_pet:%d" % sid)],
                  [("⬅️ В меню", "lrn:%d" % sid)]])
     s = sget(sid)
-    pro = bool(s["is_self"]) and bool(word["definition"])
+    pro = (bool(s["is_self"]) or (s["access"] or "full") == "full") and \
+        bool(word["definition"]) and not s["is_guest"]
     head = "📚 Осталось: {}".format(due_count(sid))
     front = ("<blockquote>{}</blockquote>".format(esc(word["definition"])) if pro
              else "<b>{}</b>".format(esc(word["term"])))
@@ -2926,7 +3348,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
                "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo", "lrn_exa", "lrn_exn",
-               "lrn_words", "lrn_more", "w_del", "w_delok",
+               "lrn_words", "lrn_more", "w_del", "w_delok", "lrn_quiet",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -2956,6 +3378,13 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                         "<code>apple - яблоко\nto give up - сдаться</code>\n\n"
                         "Можно и просто слова без перевода — оформлю сама.",
                         [[("⬅️ Назад", "lrn:%d" % sid)]])
+        if cmd == "lrn_quiet":
+            run("UPDATE students SET quiet=1-COALESCE(quiet,0) WHERE id=?", (sid,))
+            toast(cq_id, "Напоминания выключены" if sget(sid)["quiet"]
+                  else "Напоминания включены")
+            t, r = screen_more_menu(sid)
+            return edit(chat_id, message_id, t, r)
+
         if cmd == "lrn_words":
             toast(cq_id)
             t, r = screen_words_menu(sid)
@@ -3210,7 +3639,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = fn(*a)
         edit(chat_id, message_id, t, r)
 
-    if cmd.startswith(("fin_", "cr_", "money")):
+    if cmd.startswith(("fin_", "cr_", "money", "nt_", "notes")):
         sid = None
     if sid is not None and not student(sid):
         t, r = screen_students(chat_id)
@@ -3243,6 +3672,17 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "done":
         lid = record_lesson(chat_id, sid, today())
+        b = book_of(sid)
+        if b:
+            s_ = sget(sid)
+            flat = [(u["n"], l["n"]) for u in b["units"] for l in u["lessons"]]
+            try:
+                i = flat.index((s_["unit"] or 1, s_["lesson"] or 1))
+            except ValueError:
+                i = -1
+            if 0 <= i < len(flat) - 1:
+                run("UPDATE students SET unit=?, lesson=? WHERE id=?",
+                    (flat[i + 1][0], flat[i + 1][1], sid))
         return edit(chat_id, message_id, *screen_after(sid, lid))
 
     if cmd == "after":
@@ -3341,6 +3781,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         if s["rate"]:
             run("INSERT INTO payments (student_id, lessons, amount, paid_on) VALUES (?,?,?,?)",
                 (sid, n, n * s["rate"], today().isoformat()))
+            fin_income(n * s["rate"], "Оплата: " + s["name"])
             flash(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
                 esc(s["name"]), n, plural(n), fmt_money(n * s["rate"]), fmt_date(today()),
                 stats(sid)["left"]))
@@ -3385,6 +3826,54 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "hist":
         return show(screen_history, sid)
+
+    if cmd == "notes":
+        t, r = screen_notes(chat_id)
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "nt_add":
+        set_state(chat_id, pending={"action": "note_text"})
+        return edit(chat_id, message_id,
+                    "⏰ Напишите заметку и когда напомнить — одним сообщением.\n\n"
+                    "<code>завтра в 10 позвонить в клинику</code>\n"
+                    "<code>через 2 часа проверить тесты</code>\n"
+                    "<code>25.09 18:00 оплатить кредит</code>\n"
+                    "<code>каждый понедельник в 9 выставить счета</code>\n\n"
+                    "Можно прислать файл или ссылку с такой же подписью.",
+                    [[("⬅️ Назад", "notes")]])
+
+    if cmd == "nt_item":
+        r_ = q("SELECT * FROM notes WHERE id=?", (int(parts[1]),), one=True)
+        if not r_:
+            t, r = screen_notes(chat_id)
+            return edit(chat_id, message_id, t, r)
+        return edit(chat_id, message_id,
+                    "⏰ <b>{}</b>\n\n{}{}".format(
+                        fmt_when(r_["due"]), esc(r_["text"] or ""),
+                        "\n📎 " + esc(r_["file_name"] or "файл") if r_["file_id"] else ""),
+                    [[("✅ Выполнено", "nt_done:%d" % r_["id"]),
+                      ("🗑 Удалить", "nt_del:%d" % r_["id"])],
+                     [("🔁 Через час", "nt_snooze:%d" % r_["id"]),
+                      ("📅 Завтра", "nt_tom:%d" % r_["id"])],
+                     [("⬅️ Назад", "notes")]])
+
+    if cmd in ("nt_done", "nt_del"):
+        if cmd == "nt_done":
+            run("UPDATE notes SET done=1 WHERE id=?", (int(parts[1]),))
+        else:
+            run("DELETE FROM notes WHERE id=?", (int(parts[1]),))
+        toast(cq_id, "Готово")
+        t, r = screen_notes(chat_id)
+        return edit(chat_id, message_id, t, r)
+
+    if cmd in ("nt_snooze", "nt_tom"):
+        when = (datetime.now() + timedelta(hours=1)) if cmd == "nt_snooze" else \
+            datetime.combine(today() + timedelta(days=1), dtime(9, 0))
+        run("UPDATE notes SET due=?, done=0 WHERE id=?",
+            (when.isoformat(timespec="minutes"), int(parts[1])))
+        toast(cq_id, "Перенесла")
+        t, r = screen_notes(chat_id)
+        return edit(chat_id, message_id, t, r)
 
     if cmd == "money":
         t, r = screen_money()
@@ -3603,6 +4092,110 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             flash(chat_id, "Ученик не подключён к боту — запрос отправить некуда.")
         return show(screen_fb, sid)
 
+    if cmd == "book":
+        return show(screen_book, sid)
+
+    if cmd == "bk_set":
+        b = BOOKS.get(parts[2])
+        run("UPDATE students SET book=?, unit=COALESCE(unit,1), lesson=COALESCE(lesson,1) "
+            "WHERE id=?", (parts[2], sid))
+        if b and b.get("level") and not sget(sid)["level"]:
+            run("UPDATE students SET level=? WHERE id=?", (b["level"].split()[0], sid))
+        toast(cq_id, "Учебник выбран")
+        return show(screen_book, sid)
+
+    if cmd == "bk_reset":
+        run("UPDATE students SET book=NULL WHERE id=?", (sid,))
+        return show(screen_book, sid)
+
+    if cmd == "bk_pick":
+        t, r = screen_book_pick(sid, int(parts[2]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bk_lset":
+        run("UPDATE students SET unit=?, lesson=? WHERE id=?",
+            (int(parts[2]), int(parts[3]), sid))
+        toast(cq_id, "Урок выбран")
+        return show(screen_book, sid)
+
+    if cmd in ("bk_next", "bk_prev"):
+        b = book_of(sid)
+        if not b:
+            return toast(cq_id, "Учебник не выбран")
+        s_ = sget(sid)
+        flat = [(u["n"], l["n"]) for u in b["units"] for l in u["lessons"]]
+        try:
+            i = flat.index((s_["unit"] or 1, s_["lesson"] or 1))
+        except ValueError:
+            i = 0
+        i = max(0, min(i + (1 if cmd == "bk_next" else -1), len(flat) - 1))
+        run("UPDATE students SET unit=?, lesson=? WHERE id=?", (flat[i][0], flat[i][1], sid))
+        toast(cq_id)
+        return show(screen_book, sid)
+
+    if cmd == "bk_go":
+        kind = parts[2]
+        title = BOOK_KINDS[kind][0]
+        edit(chat_id, message_id, "{} — собираю по уроку…".format(title), [])
+        body, prompt, cached = ai_book_material(sid, kind)
+        if not body:
+            t, r = screen_book(sid)
+            return edit(chat_id, message_id,
+                        "⚠️ Не вышло: {}\n\n".format(esc(AI_LAST["error"][:120] or "нет ИИ")) + t, r)
+        head = "{} · {}\n\n".format(title, esc(lesson_label(sid)))
+        rows = [[("♻️ Сделать заново", "bk_re:%d:%s" % (sid, kind))]]
+        if kind == "voc":
+            rows.insert(0, [("📥 В словарь ученика", "bk_voc:%d" % sid)])
+        if kind == "hw":
+            rows.insert(0, [("📤 Отправить ученику", "bk_hw:%d" % sid)])
+        send_ai(chat_id, head + esc(body), prompt, body, "book:" + kind, sid, extra_rows=rows)
+        t, r = screen_book(sid)
+        return send(chat_id, t, r)
+
+    if cmd == "bk_re":
+        kind = parts[2]
+        edit(chat_id, message_id, "♻️ Переделываю…", [])
+        body, prompt, _ = ai_book_material(sid, kind, force=True)
+        if not body:
+            return edit(chat_id, message_id, "⚠️ ИИ не ответил.", [[("⬅️ Назад", "book:%d" % sid)]])
+        return send_ai(chat_id, "{} · {}\n\n{}".format(BOOK_KINDS[kind][0],
+                                                       esc(lesson_label(sid)), esc(body)),
+                       prompt, body, "book:" + kind, sid,
+                       extra_rows=[[("⬅️ К уроку", "book:%d" % sid)]])
+
+    if cmd == "bk_voc":
+        b = book_of(sid)
+        s_ = sget(sid)
+        body = cache_get(b["id"], lesson_of(b, s_["unit"] or 1, s_["lesson"] or 1)["code"], "voc")
+        pairs = []
+        for line in (body or "").split("\n"):
+            bits = [x.strip() for x in line.split("|")]
+            if len(bits) >= 2 and 1 < len(bits[0]) < 60:
+                pairs.append((bits[0], bits[1]))
+        if not pairs:
+            return toast(cq_id, "Не нашла строк вида «единица | перевод»")
+        n = add_words(sid, pairs, "педагог")
+        toast(cq_id, "Добавлено: {}".format(n))
+        if sget(sid)["tg_user_id"]:
+            notify_student(sid, "📚 <b>Новые слова от преподавателя</b>\n\n{}".format(
+                "\n".join("• {} — {}".format(esc(t), esc(tr)) for t, tr in pairs[:12])),
+                [[("🔁 Повторить сейчас", "lrn_go:%d" % sid)]])
+        return show(screen_book, sid)
+
+    if cmd == "bk_hw":
+        b = book_of(sid)
+        s_ = sget(sid)
+        body = cache_get(b["id"], lesson_of(b, s_["unit"] or 1, s_["lesson"] or 1)["code"], "hw")
+        if not body:
+            return toast(cq_id, "Сначала сгенерируйте домашку")
+        nxt = next_lesson_date(sid)
+        run("INSERT INTO homework (student_id, text, due, created, done) VALUES (?,?,?,?,0)",
+            (sid, body[:1500], nxt.isoformat() if nxt else None, today().isoformat()))
+        sent = notify_student(sid, "📝 <b>Домашнее задание</b>{}\n\n{}".format(
+            " к занятию " + fmt_date(nxt) if nxt else "", esc(body[:1500])))
+        toast(cq_id, "Отправлено" if sent else "Сохранено")
+        return show(screen_book, sid)
+
     if cmd == "schedm":
         return show(screen_sched_menu, sid)
 
@@ -3668,6 +4261,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id,
                     body or "За последнюю неделю у ученика нет ни повторений, ни упражнений.",
                     [[("⬅️ Назад", "st:%d" % sid)]])
+
+    if cmd == "quiet":
+        run("UPDATE students SET quiet=1-COALESCE(quiet,0) WHERE id=?", (sid,))
+        toast(cq_id, "Готово")
+        return show(screen_student, sid)
 
     if cmd == "lvl":
         return edit(chat_id, message_id,
@@ -3771,7 +4369,9 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         rows = [[("💵 Ставка за занятие", "rate:%d" % sid)],
                 [("🎥 Ссылка на Zoom", "zoom:%d" % sid),
                  ("🎚 {}".format(s["level"] or "уровень"), "lvl:%d" % sid)],
-                [("🔑 Выдать ключик", "givekey:%d" % sid)],
+                [("🔑 Выдать ключик", "givekey:%d" % sid),
+                 ("🔔 Напоминания: {}".format("выкл" if s["quiet"] else "вкл"),
+                  "quiet:%d" % sid)],
                 [("🔗 Код: взрослый", "code:%d" % sid),
                  ("🔗 Код: ребёнок", "codek:%d" % sid)],
                 [("✏️ Переименовать", "ren:%d" % sid)],
@@ -3860,6 +4460,18 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
                        last.get("kind", "misc"), last.get("sid"))
 
+    if action == "note_text":
+        when = parse_when(text)
+        set_state(chat_id, pending=None)
+        if not when:
+            return send(chat_id, "Не поняла, когда напомнить. Добавьте время: "
+                                 "«завтра в 10», «через 2 часа», «25.09 18:00».",
+                        [[("⏰ Ещё раз", "nt_add")]])
+        note_save(chat_id, text.strip(), when)
+        flash(chat_id, "✅ Напомню {}.".format(fmt_when(when.isoformat(timespec="minutes"))))
+        t, r = screen_notes(chat_id)
+        return send(chat_id, t, r)
+
     if action == "fin_new":
         lines = [l for l in text.splitlines() if l.strip()]
         added = fin_add(lines, force="income" if pending.get("kind") == "i" else "expense")
@@ -3870,7 +4482,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         body = ["💸 <b>Записала</b>", ""]
         for kind, amount, title, cat in added:
             body.append("{} {} — {} · <i>{}</i>".format(
-                "➕" if kind == "income" else "•", money(amount), esc(title), cat))
+                "➕" if kind == "income" else "➖", money(amount), esc(title), cat))
         send(chat_id, "\n".join(body))
         t, r = screen_money()
         return send(chat_id, t, r)
@@ -4233,6 +4845,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         if s["rate"]:
             run("INSERT INTO payments (student_id, lessons, amount, paid_on) VALUES (?,?,?,?)",
                 (sid, n, n * s["rate"], today().isoformat()))
+            fin_income(n * s["rate"], "Оплата: " + s["name"])
             set_state(chat_id, pending=None)
             flash(chat_id, "✅ Оплата: {} {} · {}. Остаток: <b>{}</b>.".format(
                 n, plural(n), fmt_money(n * s["rate"]), stats(sid)["left"]))
@@ -4260,6 +4873,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             amount = float(digits) if digits.strip(".") else 0.0
         run("INSERT INTO payments (student_id, lessons, amount, paid_on, receipt) "
             "VALUES (?,?,?,?,?)", (sid, n, amount, d.isoformat(), locals().get("receipt")))
+        fin_income(amount, "Оплата: " + sget(sid)["name"], d)
         set_state(chat_id, pending=None)
         flash(chat_id, "✅ Оплата — <b>{}</b>: {} {} · {} · {}.\nОстаток: <b>{}</b>.".format(
             esc(sget(sid)["name"]), n, plural(n), fmt_money(amount), fmt_date(d),
@@ -4390,6 +5004,34 @@ def handle_command(chat_id, user_id, text):
 
     if cmd in ("month", "месяц"):
         t, r = screen_month(chat_id)
+        return send(chat_id, t, r)
+
+    if cmd in ("books", "учебники"):
+        if not BOOKS:
+            return send(chat_id, "Учебники не загружены: положите карты в папку "
+                                 "<code>books/</code> рядом с main.py.")
+        lines = ["📕 <b>Учебники</b>", ""]
+        for b in BOOKS.values():
+            lines.append("• <b>{}</b> — {} юнитов, {} уроков, {} мин".format(
+                esc(b["title"]), len(b["units"]),
+                sum(len(u["lessons"]) for u in b["units"]), b.get("lesson_minutes", 60)))
+        who = q("SELECT name, book FROM students WHERE book IS NOT NULL AND archived=0")
+        if who:
+            lines += ["", "<b>У кого что</b>"]
+            for r_ in who:
+                lines.append("• {} — {}".format(esc(r_["name"]),
+                                                esc(BOOKS.get(r_["book"], {}).get("title", "—"))))
+        return send(chat_id, "\n".join(lines))
+
+    if cmd in ("notes", "напоминания", "напомни"):
+        if arg.strip():
+            when = parse_when(arg)
+            if when:
+                note_save(chat_id, arg.strip(), when)
+                return send(chat_id, "✅ Напомню {}.".format(
+                    fmt_when(when.isoformat(timespec="minutes"))),
+                    [[("⏰ Все напоминания", "notes")]])
+        t, r = screen_notes(chat_id)
         return send(chat_id, t, r)
 
     if cmd in ("money", "деньги", "траты"):
@@ -4842,6 +5484,17 @@ def handle_document(chat_id, doc):
     name = doc.get("file_name") or "файл"
     pending = get_state(chat_id)["pending"] or {}
 
+    if pending.get("action") == "audio":
+        b = pending.get("book")
+        code = pending.get("code")
+        run("INSERT INTO audio (book, code, track, file_id, kind, name, created) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (b, code, pending.get("track", ""), doc.get("file_id"), "audio",
+             name[:80], today().isoformat()))
+        set_state(chat_id, pending=None)
+        return send(chat_id, "🎧 Трек привязан к уроку {}.".format(code),
+                    [[("⬅️ К уроку", "book:%d" % pending.get("sid", 0))]])
+
     if pending.get("action") == "matfile":
         sid = pending.get("sid")
         set_state(chat_id, pending=None)
@@ -4886,9 +5539,25 @@ def handle(update):
         msg = update["message"]
         chat_id = msg["chat"]["id"]
         user_id = msg.get("from", {}).get("id")
-        if msg.get("document"):
+        if msg.get("document") or msg.get("photo"):
             if not is_owner(user_id):
                 return
+            cap = msg.get("caption") or ""
+            when = parse_when(cap) if cap else None
+            if when:
+                if msg.get("document"):
+                    doc = msg["document"]
+                    note_save(chat_id, cap, when, doc.get("file_id"), "doc",
+                              doc.get("file_name"))
+                else:
+                    note_save(chat_id, cap, when, msg["photo"][-1].get("file_id"), "photo",
+                              "фото")
+                return send(chat_id, "✅ Напомню {} и пришлю файл.".format(
+                    fmt_when(when.isoformat(timespec="minutes"))),
+                    [[("⏰ Все напоминания", "notes")]])
+            if msg.get("photo"):
+                return send(chat_id, "Чтобы я напомнила с этим фото, добавьте подпись "
+                                     "со временем: «завтра в 10».")
             return handle_document(chat_id, msg["document"])
         text = msg.get("text") or ""
         if not text.strip():
@@ -4902,13 +5571,24 @@ def handle(update):
         pending = get_state(chat_id)["pending"]
         if pending:
             return handle_pending(chat_id, pending, text, user_id, msg.get("entities"))
+        if is_owner(user_id) and re.match(r"^\s*(напомни|напомнить|заметка)\b", text,
+                                          re.I):
+            body = re.sub(r"^\s*(напомни(ть)?|заметка)[\s,:-]*", "", text, flags=re.I)
+            when = parse_when(body)
+            if when:
+                note_save(chat_id, body.strip(), when)
+                return send(chat_id, "✅ Напомню {}: {}".format(
+                    fmt_when(when.isoformat(timespec="minutes")), esc(body.strip()[:100])),
+                    [[("⏰ Все напоминания", "notes")]])
+            return send(chat_id, "Не поняла, когда напомнить. Например: "
+                                 "<code>напомни завтра в 10 позвонить в клинику</code>")
         if is_owner(user_id) and looks_like_money(text):
             added = fin_add([l for l in text.splitlines() if l.strip()])
             if added:
                 body = ["💸 <b>Записала</b>", ""]
                 for kind, amount, title, cat in added:
                     body.append("{} {} — {} · <i>{}</i>".format(
-                        "➕" if kind == "income" else "•", money(amount), esc(title), cat))
+                        "➕" if kind == "income" else "➖", money(amount), esc(title), cat))
                 inc, exp, _ = fin_month()
                 body += ["", "С начала месяца: +{} / −{}".format(money(inc), money(exp))]
                 return send(chat_id, "\n".join(body),
@@ -4962,6 +5642,9 @@ def main():
         meta_set("username", me["username"])
     meta_set("started_at", datetime.now().strftime("%d.%m.%Y %H:%M"))
     print("Бот запущен: @" + str(me.get("username")))
+    load_books()
+    print("Учебники:", ", ".join("{} ({} юнитов)".format(b["title"], len(b["units"]))
+                                 for b in BOOKS.values()) or "не найдены")
     n_students = q("SELECT COUNT(*) c FROM students", one=True)["c"]
     print("База данных:", os.path.abspath(DB_PATH), "| учеников:", n_students)
     if OWNER_ID and n_students == 0:
@@ -4974,6 +5657,8 @@ def main():
         {"command": "students", "description": "Ученики"},
         {"command": "today", "description": "Занятия сегодня"},
         {"command": "money", "description": "Деньги и кредиты"},
+        {"command": "notes", "description": "Напоминания"},
+        {"command": "books", "description": "Учебники"},
         {"command": "ai", "description": "Расход токенов ИИ"},
         {"command": "level", "description": "Мой уровень для ИИ-заданий"},
         {"command": "week", "description": "Ближайшая неделя"},
@@ -4999,7 +5684,7 @@ def main():
                 report_error(u)
         for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys,
                     pet_jobs, streak_keys, weekly_board, weekly_report, fin_ask,
-                    auto_backup):
+                    notes_job, auto_backup):
             try:
                 job()
             except Exception:
