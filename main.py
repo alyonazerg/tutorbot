@@ -1107,11 +1107,17 @@ def audio_match(book, name):
         n = n.replace(mt.group(0), " ")
     code = None
     # урок по номеру трека из книги учителя
+    has_map = any(l.get("tracks") for u in book["units"] for l in u["lessons"])
     if track:
         for u in book["units"]:
             for l in u["lessons"]:
                 if track in (l.get("tracks") or []):
                     code = l["code"]
+        if not code and not has_map:
+            # в детских курсах номер трека — это «юнит.номер»
+            un_ = int(track.split(".")[0])
+            if unit_of(book, un_):
+                code = "{}.1".format(un_)
     # явный код урока: 3.2, unit 3 lesson 2, u3l2
     if not code:
         m = re.search(r"\b(\d{1,2})\s?[.．]\s?(\d)\b(?!\d)", n)
@@ -1185,9 +1191,12 @@ def screen_audio_book(bid):
     for r in known:
         by.setdefault(r["code"], []).append(r)
     for code in sorted(by, key=lambda c: [int(x) for x in c.split(".")])[:12]:
+        srcs = {}
+        for t in by[code]:
+            srcs[t["kind"] if t["kind"] in ("PB", "WB", "TB") else "—"] = \
+                srcs.get(t["kind"] if t["kind"] in ("PB", "WB", "TB") else "—", 0) + 1
         lines.append("• {} — {}".format(code, ", ".join(
-            "{}{}".format(t["kind"] if t["kind"] in ("PB", "WB", "TB") else "",
-                          " " + (t["track"] or "")).strip() or "трек" for t in by[code])))
+            "{} {}".format(k, v) for k, v in sorted(srcs.items()))))
     if len(by) > 12:
         lines.append("… и ещё {} уроков".format(len(by) - 12))
     missing = [l["code"] for u in b["units"] for l in u["lessons"]
@@ -1373,22 +1382,41 @@ def screen_book_lessons(bid, un, ln=0):
     return "\n".join(lines), rows
 
 
+def audio_label(t):
+    """«PB 1.02» вместо имени файла."""
+    src = t["kind"] if t["kind"] in ("PB", "WB", "TB") else ""
+    num = t["track"] or t["code"] or ""
+    return " ".join(x for x in (src, num) if x) or (t["name"] or "трек")[:20]
+
+
+def audio_sorted(bid, code):
+    rows_ = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, code))
+
+    def key(t):
+        try:
+            a, b_ = (t["track"] or "0.0").split(".")
+            return (0 if t["kind"] == "PB" else 1, int(a), int(b_))
+        except ValueError:
+            return (2, 0, 0)
+    return sorted(rows_, key=key)
+
+
 def screen_lesson_audio(bid, un, ln):
     b = BOOKS.get(bid)
     l = lesson_of(b, un, ln)
-    tr = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, l["code"]))
+    tr = audio_sorted(bid, l["code"])
     lines = ["🎧 <b>Аудио к уроку {} {}</b>".format(l["code"], esc(l["title"])), ""]
-    if l.get("tracks"):
-        lines.append("По книге учителя: {}".format(", ".join(l["tracks"])))
-    rows = []
     if tr:
+        by = {}
         for t in tr:
-            lines.append("• {}".format(esc(t["name"] or t["track"] or "трек")))
-            rows.append([("{}{}".format("📝 " if t["task"] else "",
-                                        (t["name"] or t["track"] or "трек")[:24]),
-                          "bka_item:%d" % t["id"])])
+            by.setdefault(t["kind"] if t["kind"] in ("PB", "WB", "TB") else "—", []).append(t)
+        lines.append(" · ".join("{}: {}".format(k, len(v)) for k, v in by.items()))
+        with_task = sum(1 for t in tr if t["task"])
+        lines.append("С заданием: {} из {}".format(with_task, len(tr)))
     else:
         lines.append("Пока ничего не загружено.")
+    rows = [[("{}{}".format("📝 " if t["task"] else "🎧 ", audio_label(t)),
+              "bka_item:%d" % t["id"])] for t in tr]
     rows += [[("➕ Загрузить трек", "bka_add:%s:%d:%d" % (bid, un, ln))],
              [("⬅️ Назад", "bks_les:%s:%d:%d" % (bid, un, ln))]]
     return "\n".join(lines), rows
@@ -1425,13 +1453,12 @@ def screen_hw_draft(sid):
     d = draft_get(sid, b["id"], l["code"])
     body = (d["text"] if d else "") or ""
     ids = [int(x) for x in (d["audio"] if d else "").split(",") if x.strip().isdigit()]
-    tracks = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id",
-               (b["id"], l["code"]))
+    tracks = audio_sorted(b["id"], l["code"])
     lines = ["📝 <b>Домашка — {}</b>".format(esc(s["name"])),
              "{} · {} {}".format(esc(b["title"]), l["code"], esc(l["title"])), ""]
     lines.append(esc(body) if body else "<i>Пока пусто. Сгенерируйте или напишите сами.</i>")
     if ids:
-        names = [t["name"] or t["track"] or "трек" for t in tracks if t["id"] in ids]
+        names = [audio_label(t) for t in tracks if t["id"] in ids]
         lines += ["", "🎧 Приложено: {}".format(esc(", ".join(names)) or len(ids))]
     rows = [[("🤖 Сгенерировать", "hwd_gen:%d" % sid),
              ("✏️ Переписать", "hwd_edit:%d" % sid)],
@@ -1452,11 +1479,11 @@ def screen_hw_audio(sid):
     l = lesson_of(b, s["unit"] or 1, s["lesson"] or 1)
     d = draft_get(sid, b["id"], l["code"])
     ids = [int(x) for x in (d["audio"] if d else "").split(",") if x.strip().isdigit()]
-    tracks = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (b["id"], l["code"]))
-    rows = [[("{} {}".format("☑️" if t["id"] in ids else "▫️",
-                             (t["name"] or t["track"] or "трек")[:24]),
+    tracks = audio_sorted(b["id"], l["code"])
+    rows = [[("{} {}{}".format("☑️" if t["id"] in ids else "▫️", audio_label(t),
+                               " 📝" if t["task"] else ""),
               "hwd_atog:%d:%d" % (sid, t["id"]))] for t in tracks]
-    return ("🎧 Что приложить к домашке? Отметьте нужное.",
+    return ("🎧 Что приложить к домашке? Отмеченное уйдёт ученику вместе с заданием.",
             rows + [[("⬅️ Назад", "hwd:%d" % sid)]])
 
 
@@ -2616,7 +2643,7 @@ def text_next_lesson(sid):
         lines.append("🎥 Zoom: {}".format(esc(s["zoom"])))
     hw = current_hw(sid)
     if hw:
-        lines += ["", "📝 <b>Домашнее задание</b>", esc(hw["text"])]
+        lines += ["", "📝 <b>Homework</b>", esc(hw["text"])]
     ws = last_batch(sid)
     if ws:
         lines += ["", "📚 <b>Слова к занятию</b>",
@@ -2713,7 +2740,11 @@ def lesson_brief(b, un, ln):
     if not u or not l:
         return ""
     bits = ["Учебник: {} (уровень {}), занятие {} минут.".format(
-        b["title"], b.get("level", "—"), b.get("lesson_minutes", 60)),
+        b["title"], b.get("level", "—"), b.get("lesson_minutes", 60))]
+    if b.get("components"):
+        bits.append("На занятии используются: {}. Указывай страницы каждого из них.".format(
+            b["components"]))
+    bits += [
         "Юнит {}: {}. Урок {} — {}.".format(u["n"], u["title"], l["code"], l["title"]),
         "Цель урока: {}".format(l.get("objective", ""))]
     for key, name in (("grammar", "Грамматика"), ("vocabulary", "Лексика"),
@@ -2765,25 +2796,34 @@ def cache_put(book, code, kind, body):
 
 
 BOOK_KINDS = {
-    "plan": ("🗂 Lesson plan", "Write a concise teacher's lesson plan IN ENGLISH, in the style "
-             "of a Teacher's Book. Stages with timings that add up to the lesson length: "
-             "Warm-up, Presentation, Practice, Production, Wrap-up. For each stage: what the "
-             "teacher does, what the students do, Student's Book and Workbook pages, and "
-             "interaction pattern (T-S, pairs, groups). If teacher's notes are given above, "
-             "follow their order and ideas. Finish with two sections: ANSWER KEY — answers "
-             "for every task you put in the plan, plus the expected answers or target "
-             "language for the coursebook exercises you refer to (mark with (?) anything "
-             "you cannot be sure of, and point to the Teacher's Book page instead of "
-             "inventing); and ANTICIPATED PROBLEMS with solutions."),
-    "plan_kids": ("🗂 План занятия", "Составь короткий план занятия для работы офлайн с "
-                  "маленькими детьми. Сначала блок PREPARE — что преподавателю принести и "
-                  "распечатать (карточки, игрушки, раскраска, аудио). Затем этапы с минутами, "
-                  "строго в рамках длительности занятия: что преподаватель говорит и делает, "
-                  "что делают дети, страница книги, номер аудио. Команды и фразы для детей — "
-                  "по-английски, пояснения преподавателю — по-русски. Много движения и игр, "
-                  "мало объяснений. В конце блок КЛЮЧИ — ответы ко всем заданиям плана и "
-                  "ожидаемые ответы к упражнениям учебника, на которые ссылаешься; если "
-                  "не уверен — ставь (?) и отсылай к книге учителя."),
+    "plan": ("🗂 Lesson plan", "Write a STEP-BY-STEP teacher's script for this lesson IN "
+             "ENGLISH, detailed enough to teach from without opening the Teacher's Book.\n"
+             "Start with PREPARE: what to have ready (pages, audio, board, printouts).\n"
+             "Then numbered steps, each with: minutes, stage name, the exact words the "
+             "teacher says in quotation marks, what goes on the board, which page and "
+             "exercise number, what students do, interaction (T-S, pairs, groups), and how "
+             "you know they got it — concept questions with expected answers, instruction "
+             "check questions. Show the transition sentence between steps. Keep every "
+             "instruction one short sentence.\n"
+             "Timings must add up to the lesson length exactly.\n"
+             "Finish with ANSWER KEY — answers to every task in the plan and the expected "
+             "answers or target language for the coursebook exercises you refer to; mark "
+             "with (?) anything you cannot be sure of and point to the Teacher's Book page "
+             "instead of inventing. Then ANTICIPATED PROBLEMS with solutions."),
+    "plan_kids": ("🗂 План занятия", "Составь пошаговый сценарий занятия для офлайн-урока "
+                  "с маленькими детьми — так, чтобы вести прямо по нему, не открывая книгу "
+                  "учителя.\n"
+                  "Сначала блок PREPARE: что принести, распечатать, какие карточки и "
+                  "игрушки приготовить, какие аудио включить.\n"
+                  "Дальше пронумерованные шаги, у каждого: минуты, название этапа, "
+                  "ТОЧНЫЕ фразы преподавателя на английском в кавычках, что показываете и "
+                  "куда, что делают дети, страница книги и номер упражнения, номер аудио. "
+                  "Между шагами — фраза-переход. Пояснения преподавателю по-русски, всё "
+                  "обращённое к детям — по-английски.\n"
+                  "Минуты должны в сумме дать длительность занятия.\n"
+                  "В конце блок КЛЮЧИ — ответы ко всем заданиям плана и ожидаемые ответы "
+                  "к упражнениям учебника; где не уверен — ставь (?) и отсылай к книге "
+                  "учителя."),
     "warm": ("🔥 Разминка", "Составь разминку на 5–7 минут к этому уроку: два вопроса для "
              "устного старта, шесть предложений gap-fill (пропуск ______) на лексике юнита, "
              "четыре предложения на грамматику урока и ключи. Задания — на английском, "
@@ -2829,7 +2869,8 @@ def ai_book_material(sid, kind, force=False):
               "задание прямо про дополнительную лексику; английский естественный; "
               "без markdown-звёздочек; сразу материал, без вступлений."
               ).format(lesson_brief(b, un, ln), level_of(sid), extra, task)
-    out = ai_complete(prompt, max_tokens=2200, kind="book:" + kind, sid=sid)
+    out = ai_complete(prompt, max_tokens=3500 if kind.startswith("plan") else 2200,
+                      kind="book:" + kind, sid=sid)
     if out:
         cache_put(b["id"], l["code"], kind, out)
     return out, prompt, False
@@ -4710,8 +4751,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         nxt = next_lesson_date(sid)
         run("INSERT INTO homework (student_id, text, due, created, done) VALUES (?,?,?,?,0)",
             (sid, d["text"][:1500], nxt.isoformat() if nxt else None, today().isoformat()))
-        sent = notify_student(sid, "📝 <b>Домашнее задание</b>{}\n\n{}".format(
-            " к занятию " + fmt_date(nxt) if nxt else "", esc(d["text"][:1500])))
+        sent = notify_student(sid, "📝 <b>Homework</b>{}\n\n{}".format(
+            " for " + fmt_date(nxt) if nxt else "", esc(d["text"][:1500])))
         ids = [int(x) for x in (d["audio"] or "").split(",") if x.strip().isdigit()]
         st = sget(sid)
         for tid in ids:
@@ -4974,8 +5015,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         nxt = next_lesson_date(sid)
         run("INSERT INTO homework (student_id, text, due, created, done) VALUES (?,?,?,?,0)",
             (sid, body[:1500], nxt.isoformat() if nxt else None, today().isoformat()))
-        sent = notify_student(sid, "📝 <b>Домашнее задание</b>{}\n\n{}".format(
-            " к занятию " + fmt_date(nxt) if nxt else "", esc(body[:1500])))
+        sent = notify_student(sid, "📝 <b>Homework</b>{}\n\n{}".format(
+            " for " + fmt_date(nxt) if nxt else "", esc(body[:1500])))
         toast(cq_id, "Отправлено" if sent else "Сохранено")
         return show(screen_book, sid)
 
@@ -5573,8 +5614,8 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         run("INSERT INTO homework (student_id, text, due, created) VALUES (?,?,?,?)",
             (sid, text.strip()[:2000], due.isoformat() if due else None, today().isoformat()))
         set_state(chat_id, pending=None)
-        sent = notify_student(sid, "📝 <b>Домашнее задание</b>{}\n\n{}".format(
-            " к занятию " + fmt_date(due) if due else "", esc(text.strip()[:2000])))
+        sent = notify_student(sid, "📝 <b>Homework</b>{}\n\n{}".format(
+            " for " + fmt_date(due) if due else "", esc(text.strip()[:2000])))
         flash(chat_id, "✅ Домашка сохранена{}.".format(
             " и отправлена ученику" if sent else " (ученик не подключён к боту)"))
         if pending.get("after"):
