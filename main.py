@@ -452,6 +452,10 @@ MIGRATIONS = [
     ("students", "book", "TEXT"),
     ("students", "unit", "INTEGER"),
     ("students", "lesson", "INTEGER"),
+    ("audio", "uid", "TEXT"),
+    ("audio", "task", "TEXT"),
+    ("audio", "answers", "TEXT"),
+    ("audio", "sort", "INTEGER"),
     ("students", "keys", "INTEGER DEFAULT 0"),
     ("lessons", "reason", "TEXT"),
     ("payments", "receipt", "TEXT"),
@@ -1078,47 +1082,96 @@ def screen_study_menu(sid):
         [("📚 Слова", "words:%d" % sid), ("📎 Материалы", "mat:%d" % sid)],
         [("📝 Домашка", "hw:%d" % sid), ("🔥 Warm-up", "warm:%d" % sid)],
         [("📊 Сводка за неделю", "report:%d" % sid)],
-        [("📈 Прогресс", "prog:%d" % sid), ("💬 Отзывы", "fb:%d" % sid)],
+        [("📈 Прогресс", "prog:%d" % sid), ("📊 Статистика", "lrn_stats:%d" % sid)],
+        [("💬 Отзывы", "fb:%d" % sid)],
         [("⬅️ Назад", "st:%d" % sid)]]
 
 
 def audio_match(book, name):
-    """По имени файла определяет источник (PB/WB) и урок. → (code, track, source)."""
+    """По имени файла определяет источник (PB/WB), номер трека и урок."""
     n = " " + re.sub(r"[_\-]+", " ", name or "").lower() + " "
+    n = re.sub(r"\b(l|lvl|level)\s?\d\b", " ", n)          # L4 — это уровень, не урок
+    n = re.sub(r"\b(cd|disc|disk)\s?\d\b", " ", n)
     source = ""
-    if re.search(r"\bwb\b|workbook|рабочая", n):
+    if re.search(r"\bwb\b|workbook|activity|рабочая", n):
         source = "WB"
     elif re.search(r"\bpb\b|pupil|\bsb\b|student", n):
         source = "PB"
     elif re.search(r"\btb\b|teacher", n):
         source = "TB"
-    # явный код урока: 3.2, u3 l2, unit 3 lesson 2
-    m = re.search(r"\b(\d{1,2})[.\s]?(?:l|lesson)?\s?(\d)\b", n)
-    code = None
-    if m:
-        cand = "{}.{}".format(int(m.group(1)), int(m.group(2)))
-        if lesson_of(book, int(m.group(1)), int(m.group(2))):
-            code = cand
-    m2 = re.search(r"\bunit\s*(\d{1,2}).*?\b(?:lesson|track)\s*(\d{1,2})\b", n)
-    if m2 and lesson_of(book, int(m2.group(1)), int(m2.group(2))):
-        code = "{}.{}".format(int(m2.group(1)), int(m2.group(2)))
-    # номер трека вида 1.08 — ищем по картам треков из книги учителя
+    # номер трека: 8.11, 1.08 — вторая часть из двух цифр
     track = ""
-    mt = re.search(r"\b(\d{1,2}\.\d{2})\b", n)
+    mt = re.search(r"\b(\d{1,2})\.(\d{2})\b", n)
     if mt:
-        track = mt.group(1)
+        track = "{}.{}".format(mt.group(1), mt.group(2))
+        n = n.replace(mt.group(0), " ")
+    code = None
+    # урок по номеру трека из книги учителя
+    if track:
         for u in book["units"]:
             for l in u["lessons"]:
                 if track in (l.get("tracks") or []):
                     code = l["code"]
+    # явный код урока: 3.2, unit 3 lesson 2, u3l2
+    if not code:
+        m = re.search(r"\b(\d{1,2})\s?[.．]\s?(\d)\b(?!\d)", n)
+        if m and lesson_of(book, int(m.group(1)), int(m.group(2))):
+            code = "{}.{}".format(int(m.group(1)), int(m.group(2)))
+    if not code:
+        m2 = re.search(r"\bu(?:nit)?\s*(\d{1,2}).{0,12}?\bl(?:esson)?\s*(\d{1,2})\b", n)
+        if m2 and lesson_of(book, int(m2.group(1)), int(m2.group(2))):
+            code = "{}.{}".format(int(m2.group(1)), int(m2.group(2)))
+    # только юнит — вешаем на первый урок юнита
+    if not code:
+        m3 = re.search(r"\bu(?:nit)?\s*(\d{1,2})\b", n)
+        if m3 and unit_of(book, int(m3.group(1))):
+            code = "{}.1".format(int(m3.group(1)))
     return code, track, source
 
 
-def audio_store(book, name, file_id, code=None, source="", track=""):
-    run("INSERT INTO audio (book, code, track, file_id, kind, name, created) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (book["id"], code or "", track, file_id, source or "audio", name[:80],
+def audio_store(book, name, file_id, code=None, source="", track="", uid=""):
+    """Кладёт трек, не создавая дублей: один и тот же файл не запишется дважды."""
+    dup = q("SELECT id FROM audio WHERE book=? AND (file_id=? OR (uid<>'' AND uid=?) "
+            "OR (name=? AND COALESCE(track,'')=?))",
+            (book["id"], file_id, uid or "\u0000", name[:80], track), one=True)
+    if dup:
+        run("UPDATE audio SET code=COALESCE(NULLIF(?,''),code), "
+            "kind=COALESCE(NULLIF(?,''),kind), track=COALESCE(NULLIF(?,''),track) "
+            "WHERE id=?", (code or "", source or "", track or "", dup["id"]))
+        return False
+    run("INSERT INTO audio (book, code, track, file_id, uid, kind, name, created) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (book["id"], code or "", track, file_id, uid, source or "audio", name[:80],
          today().isoformat()))
+    return True
+
+
+def audio_resort(bid):
+    """Заново раскладывает все треки учебника по именам файлов."""
+    b = BOOKS.get(bid)
+    moved = 0
+    for r_ in q("SELECT * FROM audio WHERE book=?", (bid,)):
+        code, track, source = audio_match(b, r_["name"] or "")
+        if code != (r_["code"] or None) or track != (r_["track"] or ""):
+            run("UPDATE audio SET code=?, track=?, kind=COALESCE(NULLIF(?,''),kind) "
+                "WHERE id=?", (code or "", track, source or "", r_["id"]))
+            moved += 1
+    return moved
+
+
+def audio_dedupe(bid):
+    """Убирает дубли: одинаковый файл или одинаковое имя внутри урока."""
+    seen, killed = set(), 0
+    for r_ in q("SELECT * FROM audio WHERE book=? ORDER BY id", (bid,)):
+        key = (r_["uid"] or r_["file_id"], r_["code"] or "", (r_["name"] or "").lower())
+        alt = (r_["uid"] or r_["file_id"],)
+        if key in seen or alt in seen:
+            run("DELETE FROM audio WHERE id=?", (r_["id"],))
+            killed += 1
+        else:
+            seen.add(key)
+            seen.add(alt)
+    return killed
 
 
 def screen_audio_book(bid):
@@ -1137,7 +1190,14 @@ def screen_audio_book(bid):
                           " " + (t["track"] or "")).strip() or "трек" for t in by[code])))
     if len(by) > 12:
         lines.append("… и ещё {} уроков".format(len(by) - 12))
-    rows = [[("➕ Загрузить пачкой", "bka_bulk:%s" % bid)]]
+    missing = [l["code"] for u in b["units"] for l in u["lessons"]
+               if not any(r["code"] == l["code"] for r in known)]
+    if missing:
+        lines += ["", "Без аудио пока: {}{}".format(
+            ", ".join(missing[:14]), " …" if len(missing) > 14 else "")]
+    rows = [[("➕ Загрузить пачкой", "bka_bulk:%s" % bid)],
+            [("🔄 Разложить заново", "bka_sort:%s" % bid),
+             ("🧹 Убрать дубли", "bka_dedup:%s" % bid)]]
     if unknown:
         lines += ["", "❓ Не разобрано: <b>{}</b>".format(len(unknown))]
         rows.append([("❓ Разобрать вручную ({})".format(len(unknown)),
@@ -1161,6 +1221,62 @@ def screen_audio_fix(bid):
             [[("▶️ Послушать", "bka_send:%d" % r["id"])],
              [("🗑 Удалить", "bka_del:%d" % r["id"])],
              [("⬅️ Назад", "bka_book:%s" % bid)]])
+
+
+def screen_audio_item(tid):
+    t = q("SELECT * FROM audio WHERE id=?", (tid,), one=True)
+    if not t:
+        return "Трек не найден.", [[("⬅️ Назад", "books")]]
+    b = BOOKS.get(t["book"]) or {"title": t["book"], "units": []}
+    lines = ["🎧 <b>{}</b>".format(esc(t["name"] or t["track"] or "трек")), "",
+             "{} · урок {}{}".format(esc(b.get("title", "")), t["code"] or "—",
+                                     " · " + t["kind"] if t["kind"] in ("PB", "WB", "TB") else "")]
+    lines += ["", "<b>Задание</b>", esc(t["task"]) if t["task"] else "<i>не задано</i>"]
+    lines += ["", "<b>Ключи</b> <i>(только для вас)</i>",
+              esc(t["answers"]) if t["answers"] else "<i>нет</i>"]
+    un = ln = 1
+    for u in b.get("units", []):
+        for l in u["lessons"]:
+            if l["code"] == t["code"]:
+                un, ln = u["n"], l["n"]
+    return "\n".join(lines), [
+        [("▶️ Послушать", "bka_send:%d" % tid)],
+        [("🤖 Сгенерировать задание", "bka_gen:%d" % tid)],
+        [("✏️ Задание", "bka_task:%d" % tid), ("🔑 Ключи", "bka_ans:%d" % tid)],
+        [("📍 Перенести в другой урок", "bka_move:%d" % tid), ("🗑 Удалить", "bka_del:%d" % tid)],
+        [("⬅️ Назад", "bka:%s:%d:%d" % (t["book"], un, ln))]]
+
+
+def ai_audio_task(tid):
+    """Задание к треку и ключи — по контексту урока."""
+    t = q("SELECT * FROM audio WHERE id=?", (tid,), one=True)
+    b = BOOKS.get(t["book"])
+    if not b or not t["code"]:
+        return None
+    un = ln = None
+    for u in b["units"]:
+        for l in u["lessons"]:
+            if l["code"] == t["code"]:
+                un, ln = u["n"], l["n"]
+    if un is None:
+        return None
+    out = ai_complete(
+        "Ты преподаватель английского. К аудиозаписи урока нужно короткое задание на "
+        "аудирование и ключи.\n\n{}\n\nФайл: {}\n\n"
+        "Верни ровно две части:\nTASK: 2–3 строки — что сделать ученику, пока он слушает "
+        "(задание на английском, простое и конкретное, без пересказа содержания записи).\n"
+        "KEY: ожидаемые ответы или что должно прозвучать — для преподавателя.\n"
+        "Без markdown-звёздочек.".format(lesson_brief(b, un, ln), t["name"] or t["track"]),
+        max_tokens=400, kind="audio")
+    if not out:
+        return None
+    task, key = out, ""
+    m = re.search(r"KEY\s*:", out)
+    if m:
+        task, key = out[:m.start()], out[m.end():]
+    task = re.sub(r"^\s*TASK\s*:", "", task).strip()
+    run("UPDATE audio SET task=?, answers=? WHERE id=?", (task[:800], key.strip()[:800], tid))
+    return True
 
 
 def screen_books():
@@ -1268,8 +1384,9 @@ def screen_lesson_audio(bid, un, ln):
     if tr:
         for t in tr:
             lines.append("• {}".format(esc(t["name"] or t["track"] or "трек")))
-            rows.append([("▶️ {}".format((t["name"] or "трек")[:18]), "bka_send:%d" % t["id"]),
-                         ("🗑", "bka_del:%d" % t["id"])])
+            rows.append([("{}{}".format("📝 " if t["task"] else "",
+                                        (t["name"] or t["track"] or "трек")[:24]),
+                          "bka_item:%d" % t["id"])])
     else:
         lines.append("Пока ничего не загружено.")
     rows += [[("➕ Загрузить трек", "bka_add:%s:%d:%d" % (bid, un, ln))],
@@ -1297,6 +1414,11 @@ def draft_put(sid, bid, code, text=None, audio=None):
 def screen_hw_draft(sid):
     """Черновик домашки по уроку: правится, дополняется, уходит ученику с аудио."""
     b = book_of(sid)
+    if not b:
+        return ("📝 Чтобы собрать домашку по уроку, выберите ученику учебник.",
+                [[("📕 Выбрать учебник", "book:%d" % sid)],
+                 [("📝 Обычная домашка", "hw:%d" % sid)],
+                 [("⬅️ Назад", "st:%d" % sid)]])
     s = sget(sid)
     un, ln = s["unit"] or 1, s["lesson"] or 1
     l = lesson_of(b, un, ln)
@@ -1324,6 +1446,8 @@ def screen_hw_draft(sid):
 
 def screen_hw_audio(sid):
     b = book_of(sid)
+    if not b:
+        return screen_hw_draft(sid)
     s = sget(sid)
     l = lesson_of(b, s["unit"] or 1, s["lesson"] or 1)
     d = draft_get(sid, b["id"], l["code"])
@@ -1338,8 +1462,9 @@ def screen_hw_audio(sid):
 
 def unit_target_words(sid, n=12):
     b = book_of(sid)
-    s = sget(sid)
-    u = unit_of(b, s["unit"] or 1)
+    if not b:
+        return []
+    u = unit_of(b, sget(sid)["unit"] or 1)
     return (u.get("wordlist") or [])[:n] if u else []
 
 
@@ -1367,12 +1492,14 @@ def screen_book(sid):
                 lines.append("{}: {}".format(name, esc(l[key])))
         if l.get("wb_page"):
             lines.append("Тетрадь: стр. {}".format(l["wb_page"]))
-        if l.get("tracks"):
-            have = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code=?",
-                     (b["id"], l["code"]), one=True)["c"]
-            lines.append("Аудио: {}{}".format(", ".join(l["tracks"]),
-                                              " ✅" if have else " (не загружено)"))
-    rows = [[("🗂 Lesson plan", "bk_go:%d:plan" % sid), ("🔥 Разминка", "bk_go:%d:warm" % sid)],
+        have = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code=?",
+                 (b["id"], l["code"]), one=True)["c"]
+        if have or l.get("tracks"):
+            lines.append("Аудио: {}".format("{} шт. ✅".format(have) if have
+                                            else "не загружено"))
+    kids = (b.get("audience") or "").startswith(("дошк", "перв"))
+    rows = [[("🗂 План занятия" if kids else "🗂 Lesson plan", "bk_go:%d:plan" % sid),
+             ("🔥 Разминка", "bk_go:%d:warm" % sid)],
             [("🧩 Упражнения", "bk_go:%d:ex" % sid), ("📝 Домашка", "hwd:%d" % sid)],
             [("➕ Доп. лексика", "bk_go:%d:voc" % sid)],
             [("◀️ Урок", "bk_prev:%d" % sid), ("▶️ Урок", "bk_next:%d" % sid)],
@@ -2613,6 +2740,16 @@ def lesson_brief(b, un, ln):
         bits.append("Аудиотреки урока: {}".format(", ".join(l["tracks"])))
     if l.get("tb_notes"):
         bits.append("Заметки из книги учителя (опирайся на них): {}".format(l["tb_notes"]))
+    try:
+        tr = q("SELECT name, task, answers FROM audio WHERE book=? AND code=? "
+               "AND (task<>'' OR answers<>'')", (b["id"], l["code"]))
+    except sqlite3.Error:
+        tr = []
+    if tr:
+        bits.append("Загруженное аудио урока и задания к нему: " + " | ".join(
+            "{}: {}{}".format(t["name"] or "трек", (t["task"] or "").replace("\n", " ")[:160],
+                              " [ключи: {}]".format((t["answers"] or "").replace("\n", " ")[:120])
+                              if t["answers"] else "") for t in tr[:6]))
     return "\n".join(bits)
 
 
@@ -2633,7 +2770,20 @@ BOOK_KINDS = {
              "Warm-up, Presentation, Practice, Production, Wrap-up. For each stage: what the "
              "teacher does, what the students do, Student's Book and Workbook pages, and "
              "interaction pattern (T-S, pairs, groups). If teacher's notes are given above, "
-             "follow their order and ideas. End with Anticipated problems and solutions."),
+             "follow their order and ideas. Finish with two sections: ANSWER KEY — answers "
+             "for every task you put in the plan, plus the expected answers or target "
+             "language for the coursebook exercises you refer to (mark with (?) anything "
+             "you cannot be sure of, and point to the Teacher's Book page instead of "
+             "inventing); and ANTICIPATED PROBLEMS with solutions."),
+    "plan_kids": ("🗂 План занятия", "Составь короткий план занятия для работы офлайн с "
+                  "маленькими детьми. Сначала блок PREPARE — что преподавателю принести и "
+                  "распечатать (карточки, игрушки, раскраска, аудио). Затем этапы с минутами, "
+                  "строго в рамках длительности занятия: что преподаватель говорит и делает, "
+                  "что делают дети, страница книги, номер аудио. Команды и фразы для детей — "
+                  "по-английски, пояснения преподавателю — по-русски. Много движения и игр, "
+                  "мало объяснений. В конце блок КЛЮЧИ — ответы ко всем заданиям плана и "
+                  "ожидаемые ответы к упражнениям учебника, на которые ссылаешься; если "
+                  "не уверен — ставь (?) и отсылай к книге учителя."),
     "warm": ("🔥 Разминка", "Составь разминку на 5–7 минут к этому уроку: два вопроса для "
              "устного старта, шесть предложений gap-fill (пропуск ______) на лексике юнита, "
              "четыре предложения на грамматику урока и ключи. Задания — на английском, "
@@ -3485,6 +3635,97 @@ def screen_learner(sid):
     return "\n".join(lines), rows
 
 
+def deck_stats(sid):
+    """Состояние колоды как в Anki: новые, на изучении, молодые, зрелые."""
+    rows_ = q("SELECT ivl, reps, lapses, ease, due FROM words "
+              "WHERE student_id=? AND COALESCE(raw,0)=0", (sid,))
+    st = {"new": 0, "learning": 0, "young": 0, "mature": 0, "total": len(rows_),
+          "suspended": 0, "lapses": 0, "ease": []}
+    for w in rows_:
+        ivl, reps = w["ivl"] or 0, w["reps"] or 0
+        st["lapses"] += w["lapses"] or 0
+        if w["ease"]:
+            st["ease"].append(w["ease"])
+        if reps == 0:
+            st["new"] += 1
+        elif ivl == 0:
+            st["learning"] += 1
+        elif ivl < 21:
+            st["young"] += 1
+        else:
+            st["mature"] += 1
+    st["ease_avg"] = round(sum(st["ease"]) / len(st["ease"]), 2) if st["ease"] else 0
+    return st
+
+
+def forecast(sid, days=14):
+    """Сколько карточек придёт на повторение в ближайшие дни."""
+    out = []
+    for i in range(days):
+        d = (today() + timedelta(days=i)).isoformat()
+        n = q("SELECT COUNT(*) c FROM words WHERE student_id=? AND COALESCE(raw,0)=0 "
+              "AND due{}?".format("<=" if i == 0 else "="), (sid, d), one=True)["c"]
+        out.append(n)
+    return out
+
+
+def review_history(sid, days=14):
+    rows_ = q("SELECT on_date, COUNT(*) c, SUM(CASE WHEN grade=0 THEN 1 ELSE 0 END) bad "
+              "FROM reviews WHERE student_id=? AND on_date>=? GROUP BY on_date",
+              (sid, (today() - timedelta(days=days - 1)).isoformat()))
+    by = {r["on_date"]: (r["c"], r["bad"]) for r in rows_}
+    return [by.get((today() - timedelta(days=days - 1 - i)).isoformat(), (0, 0))
+            for i in range(days)]
+
+
+def spark(vals, width=8):
+    """Столбики из символов — маленький график прямо в сообщении."""
+    if not vals or not max(vals):
+        return "▁" * len(vals)
+    blocks = "▁▂▃▄▅▆▇█"
+    top = max(vals)
+    return "".join(blocks[min(int(v / top * (len(blocks) - 1) + 0.5), len(blocks) - 1)]
+                   for v in vals)
+
+
+def screen_deck_stats(sid):
+    s = sget(sid)
+    st = deck_stats(sid)
+    p = progress(sid)
+    hist = review_history(sid)
+    fc = forecast(sid)
+    total_rev = q("SELECT COUNT(*) c FROM reviews WHERE student_id=?", (sid,), one=True)["c"]
+    ok = q("SELECT COUNT(*) c FROM reviews WHERE student_id=? AND grade>0", (sid,),
+           one=True)["c"]
+    days_active = q("SELECT COUNT(DISTINCT on_date) c FROM reviews WHERE student_id=?",
+                    (sid,), one=True)["c"]
+    lines = ["📊 <b>Статистика словаря</b>", "",
+             "<b>Колода</b>",
+             "🆕 Новые: <b>{}</b>".format(st["new"]),
+             "📖 На изучении: <b>{}</b>".format(st["learning"]),
+             "🌱 Молодые (&lt;21 дн.): <b>{}</b>".format(st["young"]),
+             "🌳 Зрелые (21+ дн.): <b>{}</b>".format(st["mature"]),
+             "Всего карточек: <b>{}</b>".format(st["total"]), "",
+             "<b>Повторения</b>",
+             "За 14 дней: {} ".format(spark([h[0] for h in hist])),
+             "Всего: <b>{}</b> · верных: <b>{}%</b>".format(
+                 total_rev, round(ok * 100 / total_rev) if total_rev else 0),
+             "Дней с занятиями: <b>{}</b> · серия: <b>{}</b>".format(days_active, p["streak"]),
+             "Забываний: <b>{}</b> · средняя лёгкость: <b>{}</b>".format(
+                 st["lapses"], st["ease_avg"] or "—"), "",
+             "<b>Прогноз на 14 дней</b>",
+             "{} ".format(spark(fc)),
+             "Сегодня: <b>{}</b> · завтра: <b>{}</b> · за неделю: <b>{}</b>".format(
+                 fc[0], fc[1], sum(fc[:7]))]
+    hard = hard_words(sid, days=30, limit=5)
+    if hard:
+        lines += ["", "<b>Труднее всего</b>"]
+        for h in hard:
+            lines.append("• {} — {} ({}×)".format(esc(h["term"]), esc(h["tr"] or ""), h["c"]))
+    return "\n".join(lines), [[("🔁 Повторить ({})".format(due_count(sid)), "lrn_go:%d" % sid)],
+                              [("⬅️ Назад", "lrn_words:%d" % sid)]]
+
+
 def screen_words_menu(sid):
     due, total = due_count(sid), word_count(sid)
     p = progress(sid)
@@ -3493,7 +3734,8 @@ def screen_words_menu(sid):
                 total, p["learned"], p["pct"], due, p["streak"]),
             [[("🔁 Повторить ({})".format(due), "lrn_go:%d" % sid)],
              [("➕ Добавить слова", "lrn_add:%d" % sid), ("📖 Мои слова", "lw:%d" % sid)],
-             [("📈 Прогресс", "lrn_prog:%d" % sid), ("🏆 Рейтинг", "lrn_board:%d" % sid)],
+             [("📈 Прогресс", "lrn_prog:%d" % sid), ("📊 Статистика", "lrn_stats:%d" % sid)],
+             [("🏆 Рейтинг", "lrn_board:%d" % sid)],
              [("⬅️ Назад", "lrn:%d" % sid)]])
 
 
@@ -3648,7 +3890,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
                "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo", "lrn_exa", "lrn_exn",
-               "lrn_words", "lrn_more", "w_del", "w_delok", "lrn_quiet",
+               "lrn_words", "lrn_more", "w_del", "w_delok", "lrn_quiet", "lrn_stats",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -3683,6 +3925,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             toast(cq_id, "Напоминания выключены" if sget(sid)["quiet"]
                   else "Напоминания включены")
             t, r = screen_more_menu(sid)
+            return edit(chat_id, message_id, t, r)
+
+        if cmd == "lrn_stats":
+            toast(cq_id)
+            t, r = screen_deck_stats(sid)
             return edit(chat_id, message_id, t, r)
 
         if cmd == "lrn_words":
@@ -4392,6 +4639,10 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             flash(chat_id, "Ученик не подключён к боту — запрос отправить некуда.")
         return show(screen_fb, sid)
 
+    if cmd.startswith(("hwd", "bk_")) and not book_of(sid) and cmd not in ("bk_set",):
+        t, r = screen_book(sid)
+        return edit(chat_id, message_id, t, r)
+
     if cmd == "hwd":
         t, r = screen_hw_draft(sid)
         return edit(chat_id, message_id, t, r)
@@ -4466,8 +4717,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         for tid in ids:
             t_ = q("SELECT * FROM audio WHERE id=?", (tid,), one=True)
             if t_ and st["tg_user_id"]:
+                cap = "{} {}".format(b["title"], l["code"])
+                if t_["task"]:
+                    cap += "\n" + t_["task"][:900]
                 tg("sendAudio", chat_id=st["tg_user_id"], audio=t_["file_id"],
-                   caption="{} {}".format(b["title"], l["code"]))
+                   caption=cap[:1000])
         toast(cq_id, "Отправлено" if sent else "Сохранено (ученик не подключён)")
         t, r = screen_hw_draft(sid)
         return edit(chat_id, message_id, t, r)
@@ -4528,6 +4782,44 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = screen_audio_book(parts[1])
         return edit(chat_id, message_id, t, r)
 
+    if cmd == "bka_item":
+        t, r = screen_audio_item(int(parts[1]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bka_gen":
+        edit(chat_id, message_id, "🤖 Придумываю задание к записи…", [])
+        ok_ = ai_audio_task(int(parts[1]))
+        t, r = screen_audio_item(int(parts[1]))
+        return edit(chat_id, message_id,
+                    ("" if ok_ else "⚠️ ИИ не ответил или у трека нет урока.\n\n") + t, r)
+
+    if cmd in ("bka_task", "bka_ans"):
+        set_state(chat_id, pending={"action": "audiofield", "tid": int(parts[1]),
+                                    "field": "task" if cmd == "bka_task" else "answers"})
+        return edit(chat_id, message_id,
+                    "✏️ Пришлите {} для этой записи.".format(
+                        "задание — его увидит ученик" if cmd == "bka_task"
+                        else "ключи — они останутся только у вас"),
+                    [[("⬅️ Назад", "bka_item:%s" % parts[1])]])
+
+    if cmd == "bka_move":
+        set_state(chat_id, pending={"action": "audiomove", "tid": int(parts[1])})
+        return edit(chat_id, message_id,
+                    "📍 В какой урок перенести? Пришлите код, например <code>3.2</code>.",
+                    [[("⬅️ Назад", "bka_item:%s" % parts[1])]])
+
+    if cmd == "bka_sort":
+        moved = audio_resort(parts[1])
+        toast(cq_id, "Переложено: {}".format(moved))
+        t, r = screen_audio_book(parts[1])
+        return edit(chat_id, message_id, "🔄 Переложено треков: {}\n\n".format(moved) + t, r)
+
+    if cmd == "bka_dedup":
+        killed = audio_dedupe(parts[1])
+        toast(cq_id, "Удалено дублей: {}".format(killed))
+        t, r = screen_audio_book(parts[1])
+        return edit(chat_id, message_id, "🧹 Убрано дублей: {}\n\n".format(killed) + t, r)
+
     if cmd == "bka_bulk":
         set_state(chat_id, pending={"action": "audio_book", "book": parts[1]})
         return edit(chat_id, message_id,
@@ -4574,8 +4866,10 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t = q("SELECT * FROM audio WHERE id=?", (int(parts[1]),), one=True)
         if not t:
             return toast(cq_id, "Файл не найден")
-        tg("sendAudio", chat_id=chat_id, audio=t["file_id"],
-           caption="{} · {}".format(BOOKS.get(t["book"], {}).get("title", ""), t["code"]))
+        cap = "{} · {}".format(BOOKS.get(t["book"], {}).get("title", ""), t["code"])
+        if t["task"]:
+            cap += "\n" + t["task"][:500]
+        tg("sendAudio", chat_id=chat_id, audio=t["file_id"], caption=cap[:1000])
         return toast(cq_id, "Отправила")
 
     if cmd == "book":
@@ -4621,6 +4915,9 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "bk_go":
         kind = parts[2]
+        b_ = book_of(sid)
+        if kind == "plan" and b_ and (b_.get("audience") or "").startswith(("дошк", "перв")):
+            kind = "plan_kids"
         title = BOOK_KINDS[kind][0]
         edit(chat_id, message_id, "{} — собираю по уроку…".format(title), [])
         body, prompt, cached = ai_book_material(sid, kind)
@@ -4945,6 +5242,25 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         last = ai_last(chat_id) or {}
         return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
                        last.get("kind", "misc"), last.get("sid"))
+
+    if action == "audiofield":
+        run("UPDATE audio SET {}=? WHERE id=?".format(pending["field"]),
+            (text.strip()[:800], pending["tid"]))
+        set_state(chat_id, pending=None)
+        t, r = screen_audio_item(pending["tid"])
+        return send(chat_id, t, r)
+
+    if action == "audiomove":
+        t_ = q("SELECT * FROM audio WHERE id=?", (pending["tid"],), one=True)
+        b = BOOKS.get(t_["book"]) if t_ else None
+        m = re.search(r"(\d{1,2})[.\s](\d{1,2})", text)
+        if not b or not m or not lesson_of(b, int(m.group(1)), int(m.group(2))):
+            return send(chat_id, "Не нашла такой урок. Пришлите код вида <code>3.2</code>.")
+        run("UPDATE audio SET code=? WHERE id=?",
+            ("{}.{}".format(int(m.group(1)), int(m.group(2))), pending["tid"]))
+        set_state(chat_id, pending=None)
+        t, r = screen_audio_item(pending["tid"])
+        return send(chat_id, "✅ Перенесла.\n\n" + t, r)
 
     if action == "audio_fix":
         b = BOOKS.get(pending["book"])
@@ -6064,7 +6380,11 @@ def handle_document(chat_id, doc):
             set_state(chat_id, pending=None)
             return send(chat_id, "Учебник не найден.")
         code, track, source = audio_match(b, name)
-        audio_store(b, name, doc.get("file_id"), code, source, track)
+        fresh = audio_store(b, name, doc.get("file_id"), code, source, track,
+                            doc.get("file_unique_id", ""))
+        if not fresh:
+            return send(chat_id, "↩️ {} уже был загружен — пропускаю.".format(esc(name[:50])),
+                        [[("✅ Готово", "bka_book:%s" % b["id"])]])
         done = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code<>''", (b["id"],),
                  one=True)["c"]
         left = q("SELECT COUNT(*) c FROM audio WHERE book=? AND (code IS NULL OR code='')",
