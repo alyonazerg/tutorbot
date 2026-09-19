@@ -415,6 +415,8 @@ CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER, text TEXT, file_id TEXT, file_kind TEXT, file_name TEXT,
     due TEXT, repeat TEXT, done INTEGER DEFAULT 0, created TEXT);
+CREATE TABLE IF NOT EXISTS books (
+    id TEXT PRIMARY KEY, data TEXT, updated TEXT);
 CREATE TABLE IF NOT EXISTS audio (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     book TEXT, code TEXT, track TEXT, file_id TEXT, kind TEXT, name TEXT, created TEXT);
@@ -963,7 +965,8 @@ def screen_students(chat_id):
     if line:
         rows.append(line)
     rows.append([("➕ Ученик", "new"), ("📊 Месяц", "month")])
-    rows.append([("📚 Мой словарь", "myw"), ("💰 Деньги", "money")])
+    rows.append([("📚 Мой словарь", "myw"), ("📕 Учебники", "books")])
+    rows.append([("💰 Деньги", "money")])
     rows.append([("⏰ Напоминания", "notes"), ("💌 Визитка", "promo_me")])
     rows.append([("📁 CSV", "export")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
@@ -1076,6 +1079,120 @@ def screen_study_menu(sid):
         [("⬅️ Назад", "st:%d" % sid)]]
 
 
+def screen_books():
+    lines = ["📕 <b>Учебники</b>", ""]
+    rows = []
+    if not BOOKS:
+        lines += ["Пока ни одного.", "",
+                  "Пришлите мне файл карты учебника (.json) — я его подключу. "
+                  "Файлы можно и положить в папку <code>books/</code> рядом с кодом."]
+    for bid, b in BOOKS.items():
+        u, l, w = book_stats(b)
+        lines.append("• <b>{}</b> — {} юнитов, {} уроков, {} слов, {} мин".format(
+            esc(b["title"]), u, l, w, b.get("lesson_minutes", 60)))
+        rows.append([(b["title"][:24], "bks_open:%s" % bid)])
+    rows.append([("⬅️ К ученикам", "menu")])
+    return "\n".join(lines), rows
+
+
+def screen_book_admin(bid):
+    b = BOOKS.get(bid)
+    if not b:
+        return screen_books()
+    u, l, w = book_stats(b)
+    who = q("SELECT name FROM students WHERE book=? AND archived=0", (bid,))
+    tracks = q("SELECT COUNT(*) c FROM audio WHERE book=?", (bid,), one=True)["c"]
+    lines = ["📕 <b>{}</b>".format(esc(b["title"])), "",
+             "Уровень: {} · занятие {} мин".format(b.get("level", "—"),
+                                                   b.get("lesson_minutes", 60)),
+             "{} юнитов · {} уроков · {} слов в списках".format(u, l, w),
+             "Аудио загружено: {}".format(tracks)]
+    if who:
+        lines.append("Занимаются: {}".format(esc(", ".join(r["name"] for r in who))))
+    rows = [[("⏱ Длительность занятия", "bks_min:%s" % bid)],
+            [("📚 Юниты и лексика", "bks_units:%s:0" % bid)],
+            [("🗑 Удалить учебник", "bks_del:%s" % bid)],
+            [("⬅️ Назад", "books")]]
+    return "\n".join(lines), rows
+
+
+def screen_book_units(bid, un=0):
+    b = BOOKS.get(bid)
+    if not un:
+        rows, line = [], []
+        for u in b["units"]:
+            line.append(("{}. {}".format(u["n"], u["title"][:14]), "bks_units:%s:%d" % (bid, u["n"])))
+            if len(line) == 2:
+                rows.append(line); line = []
+        if line:
+            rows.append(line)
+        return ("📚 <b>{}</b> — выберите юнит".format(esc(b["title"])),
+                rows + [[("⬅️ Назад", "bks_open:%s" % bid)]])
+    u = unit_of(b, un)
+    wl = u.get("wordlist") or []
+    lines = ["📚 <b>Юнит {}: {}</b>".format(u["n"], esc(u["title"])), ""]
+    if u.get("vocabulary_topic"):
+        lines.append("Тема: {}".format(esc(u["vocabulary_topic"])))
+    lines += ["", "<b>Лексика юнита ({})</b>".format(len(wl)),
+              esc(", ".join(wl)) if wl else "<i>пусто — ИИ будет опираться только на тему</i>"]
+    rows = [[("✏️ Заменить список слов", "bks_wl:%s:%d" % (bid, un))],
+            [("➕ Дописать слова", "bks_wladd:%s:%d" % (bid, un))],
+            [("📝 Уроки юнита", "bks_les:%s:%d:0" % (bid, un))],
+            [("⬅️ К юнитам", "bks_units:%s:0" % bid)]]
+    return "\n".join(lines), rows
+
+
+def screen_book_lessons(bid, un, ln=0):
+    b = BOOKS.get(bid)
+    u = unit_of(b, un)
+    if not ln:
+        rows = [[("{} {}".format(l["code"], l["title"][:22]), "bks_les:%s:%d:%d" % (bid, un, l["n"]))]
+                for l in u["lessons"]]
+        return ("📝 <b>Юнит {}</b> — выберите урок".format(un),
+                rows + [[("⬅️ Назад", "bks_units:%s:%d" % (bid, un))]])
+    l = lesson_of(b, un, ln)
+    lines = ["📝 <b>{} {}</b>".format(l["code"], esc(l["title"])), ""]
+    for key, name in (("objective", "Цель"), ("grammar", "Грамматика"),
+                      ("vocabulary", "Лексика"), ("functional", "Функц. язык"),
+                      ("reading", "Чтение"), ("listening", "Аудирование"),
+                      ("speaking", "Говорение"), ("writing", "Письмо"),
+                      ("phonics", "Фонетика")):
+        if l.get(key):
+            lines.append("{}: {}".format(name, esc(l[key])))
+    if l.get("wb_page"):
+        lines.append("Тетрадь: стр. {}".format(l["wb_page"]))
+    tr = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, l["code"]))
+    lines.append("Аудио: {}".format(", ".join(esc(t["name"] or t["track"] or "трек")
+                                              for t in tr) if tr else "нет"))
+    rows = [[("✏️ Цель", "bks_f:%s:%d:%d:objective" % (bid, un, ln)),
+             ("✏️ Грамматика", "bks_f:%s:%d:%d:grammar" % (bid, un, ln))],
+            [("✏️ Название", "bks_f:%s:%d:%d:title" % (bid, un, ln)),
+             ("✏️ Лексика урока", "bks_f:%s:%d:%d:vocabulary" % (bid, un, ln))],
+            [("🎧 Аудио урока", "bka:%s:%d:%d" % (bid, un, ln))],
+            [("⬅️ К урокам", "bks_les:%s:%d:0" % (bid, un))]]
+    return "\n".join(lines), rows
+
+
+def screen_lesson_audio(bid, un, ln):
+    b = BOOKS.get(bid)
+    l = lesson_of(b, un, ln)
+    tr = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, l["code"]))
+    lines = ["🎧 <b>Аудио к уроку {} {}</b>".format(l["code"], esc(l["title"])), ""]
+    if l.get("tracks"):
+        lines.append("По книге учителя: {}".format(", ".join(l["tracks"])))
+    rows = []
+    if tr:
+        for t in tr:
+            lines.append("• {}".format(esc(t["name"] or t["track"] or "трек")))
+            rows.append([("▶️ {}".format((t["name"] or "трек")[:18]), "bka_send:%d" % t["id"]),
+                         ("🗑", "bka_del:%d" % t["id"])])
+    else:
+        lines.append("Пока ничего не загружено.")
+    rows += [[("➕ Загрузить трек", "bka_add:%s:%d:%d" % (bid, un, ln))],
+             [("⬅️ Назад", "bks_les:%s:%d:%d" % (bid, un, ln))]]
+    return "\n".join(lines), rows
+
+
 def screen_book(sid):
     s = sget(sid)
     b = book_of(sid)
@@ -1109,6 +1226,8 @@ def screen_book(sid):
             [("🧩 Упражнения", "bk_go:%d:ex" % sid), ("📝 Домашка", "bk_go:%d:hw" % sid)],
             [("➕ Доп. лексика", "bk_go:%d:voc" % sid)],
             [("◀️ Урок", "bk_prev:%d" % sid), ("▶️ Урок", "bk_next:%d" % sid)],
+            [("🎧 Аудио урока", "bka:%s:%d:%d" % (b["id"], un, ln)),
+             ("✏️ Правка урока", "bks_les:%s:%d:%d" % (b["id"], un, ln))],
             [("📚 Выбрать урок", "bk_pick:%d:%d" % (sid, un)),
              ("📕 Сменить учебник", "bk_reset:%d" % sid)],
             [("⬅️ Назад", "st:%d" % sid)]]
@@ -2241,21 +2360,45 @@ BOOKS = {}
 
 
 def load_books():
-    """Читает карты учебников из папки books рядом с кодом."""
+    """Карты учебников: файлы из папки books плюс всё, что загружено в бота."""
     BOOKS.clear()
-    if not os.path.isdir(BOOKS_DIR):
-        return BOOKS
-    for fn in sorted(os.listdir(BOOKS_DIR)):
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(BOOKS_DIR, fn), encoding="utf-8") as f:
-                b = json.load(f)
-            if b.get("id") and b.get("units"):
-                BOOKS[b["id"]] = b
-        except Exception as e:
-            print("Не прочитался учебник", fn, e)
+    if os.path.isdir(BOOKS_DIR):
+        for fn in sorted(os.listdir(BOOKS_DIR)):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(BOOKS_DIR, fn), encoding="utf-8") as f:
+                    b = json.load(f)
+                if b.get("id") and b.get("units"):
+                    BOOKS[b["id"]] = b
+            except Exception as e:
+                print("Не прочитался учебник", fn, e)
+    try:
+        for r in q("SELECT * FROM books"):
+            try:
+                b = json.loads(r["data"])
+                if b.get("id") and b.get("units"):
+                    BOOKS[b["id"]] = b
+            except ValueError:
+                pass
+    except sqlite3.Error:
+        pass
     return BOOKS
+
+
+def save_book(b):
+    """Сохраняет учебник в базу — переживает обновление кода и попадает в бэкап."""
+    run("INSERT INTO books (id, data, updated) VALUES (?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated=excluded.updated",
+        (b["id"], json.dumps(b, ensure_ascii=False), today().isoformat()))
+    BOOKS[b["id"]] = b
+
+
+def book_stats(b):
+    units = len(b["units"])
+    lessons = sum(len(u["lessons"]) for u in b["units"])
+    words = sum(len(u.get("wordlist") or []) for u in b["units"])
+    return units, lessons, words
 
 
 def book_of(sid):
@@ -3639,7 +3782,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = fn(*a)
         edit(chat_id, message_id, t, r)
 
-    if cmd.startswith(("fin_", "cr_", "money", "nt_", "notes")):
+    if cmd.startswith(("fin_", "cr_", "money", "nt_", "notes", "bks_", "bka", "books")):
         sid = None
     if sid is not None and not student(sid):
         t, r = screen_students(chat_id)
@@ -4092,6 +4235,94 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             flash(chat_id, "Ученик не подключён к боту — запрос отправить некуда.")
         return show(screen_fb, sid)
 
+    if cmd == "books":
+        t, r = screen_books()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bks_open":
+        t, r = screen_book_admin(parts[1])
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bks_units":
+        t, r = screen_book_units(parts[1], int(parts[2]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bks_les":
+        t, r = screen_book_lessons(parts[1], int(parts[2]), int(parts[3]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bks_min":
+        set_state(chat_id, pending={"action": "bookfield", "bid": parts[1],
+                                    "field": "lesson_minutes"})
+        return edit(chat_id, message_id, "⏱ Сколько минут длится занятие? Пришлите число.",
+                    [[("⬅️ Назад", "bks_open:%s" % parts[1])]])
+
+    if cmd == "bks_del":
+        b = BOOKS.get(parts[1])
+        run("DELETE FROM books WHERE id=?", (parts[1],))
+        run("UPDATE students SET book=NULL WHERE book=?", (parts[1],))
+        load_books()
+        toast(cq_id, "Удалён")
+        t, r = screen_books()
+        return edit(chat_id, message_id,
+                    ("🗑 «{}» убран из бота.\n\n".format(esc(b["title"])) if b else "") + t, r)
+
+    if cmd in ("bks_wl", "bks_wladd"):
+        set_state(chat_id, pending={"action": "wordlist", "bid": parts[1],
+                                    "unit": int(parts[2]), "mode": cmd})
+        return edit(chat_id, message_id,
+                    "📚 Пришлите слова юнита через запятую или по одному в строке.\n"
+                    "{}".format("Старый список заменю." if cmd == "bks_wl"
+                                else "Допишу к тому, что есть."),
+                    [[("⬅️ Назад", "bks_units:%s:%d" % (parts[1], int(parts[2])))]])
+
+    if cmd == "bks_f":
+        set_state(chat_id, pending={"action": "lessonfield", "bid": parts[1],
+                                    "unit": int(parts[2]), "lesson": int(parts[3]),
+                                    "field": parts[4]})
+        l = lesson_of(BOOKS[parts[1]], int(parts[2]), int(parts[3]))
+        return edit(chat_id, message_id,
+                    "✏️ Сейчас: <code>{}</code>\n\nПришлите новый текст.".format(
+                        esc(str(l.get(parts[4], "—")))),
+                    [[("⬅️ Назад", "bks_les:%s:%d:%d" % (parts[1], int(parts[2]),
+                                                        int(parts[3])))]])
+
+    if cmd == "bka":
+        t, r = screen_lesson_audio(parts[1], int(parts[2]), int(parts[3]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bka_add":
+        l = lesson_of(BOOKS[parts[1]], int(parts[2]), int(parts[3]))
+        set_state(chat_id, pending={"action": "audio", "book": parts[1], "code": l["code"],
+                                    "unit": int(parts[2]), "lesson": int(parts[3])})
+        return edit(chat_id, message_id,
+                    "🎧 Пришлите аудиофайл для урока {}. Можно несколько подряд — "
+                    "каждый следующий тоже привяжу к этому уроку.".format(l["code"]),
+                    [[("⬅️ Назад", "bka:%s:%d:%d" % (parts[1], int(parts[2]),
+                                                    int(parts[3])))]])
+
+    if cmd == "bka_del":
+        t = q("SELECT * FROM audio WHERE id=?", (int(parts[1]),), one=True)
+        run("DELETE FROM audio WHERE id=?", (int(parts[1]),))
+        toast(cq_id, "Удалено")
+        if not t:
+            return
+        b = BOOKS.get(t["book"])
+        u = next((u["n"] for u in b["units"] for l in u["lessons"]
+                  if l["code"] == t["code"]), 1) if b else 1
+        l = next((l["n"] for uu in b["units"] for l in uu["lessons"]
+                  if l["code"] == t["code"]), 1) if b else 1
+        tt, r = screen_lesson_audio(t["book"], u, l)
+        return edit(chat_id, message_id, tt, r)
+
+    if cmd == "bka_send":
+        t = q("SELECT * FROM audio WHERE id=?", (int(parts[1]),), one=True)
+        if not t:
+            return toast(cq_id, "Файл не найден")
+        tg("sendAudio", chat_id=chat_id, audio=t["file_id"],
+           caption="{} · {}".format(BOOKS.get(t["book"], {}).get("title", ""), t["code"]))
+        return toast(cq_id, "Отправила")
+
     if cmd == "book":
         return show(screen_book, sid)
 
@@ -4459,6 +4690,38 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         last = ai_last(chat_id) or {}
         return send_ai(chat_id, esc(out), last.get("prompt", ""), out,
                        last.get("kind", "misc"), last.get("sid"))
+
+    if action in ("bookfield", "lessonfield", "wordlist"):
+        b = BOOKS.get(pending["bid"])
+        set_state(chat_id, pending=None)
+        if not b:
+            return send(chat_id, "Учебник не найден.")
+        val = text.strip()
+        if action == "bookfield":
+            b[pending["field"]] = int(re.sub(r"\D", "", val) or 60) \
+                if pending["field"] == "lesson_minutes" else val[:120]
+            save_book(b)
+            flash(chat_id, "✅ Сохранила.")
+            t, r = screen_book_admin(b["id"])
+            return send(chat_id, t, r)
+        if action == "wordlist":
+            u = unit_of(b, pending["unit"])
+            items = [w.strip() for w in re.split(r"[,\n;]", val) if w.strip()]
+            old = list(u.get("wordlist") or []) if pending["mode"] == "bks_wladd" else []
+            for w in items:
+                if w not in old:
+                    old.append(w)
+            u["wordlist"] = old[:200]
+            save_book(b)
+            flash(chat_id, "✅ В юните {} теперь {} слов.".format(u["n"], len(old)))
+            t, r = screen_book_units(b["id"], u["n"])
+            return send(chat_id, t, r)
+        l = lesson_of(b, pending["unit"], pending["lesson"])
+        l[pending["field"]] = val[:300]
+        save_book(b)
+        flash(chat_id, "✅ Сохранила.")
+        t, r = screen_book_lessons(b["id"], pending["unit"], pending["lesson"])
+        return send(chat_id, t, r)
 
     if action == "note_text":
         when = parse_when(text)
@@ -5007,6 +5270,9 @@ def handle_command(chat_id, user_id, text):
         return send(chat_id, t, r)
 
     if cmd in ("books", "учебники"):
+        if arg.strip() in ("экран", "меню", ""):
+            t, r = screen_books()
+            return send(chat_id, t, r)
         if not BOOKS:
             return send(chat_id, "Учебники не загружены: положите карты в папку "
                                  "<code>books/</code> рядом с main.py.")
@@ -5484,6 +5750,19 @@ def handle_document(chat_id, doc):
     name = doc.get("file_name") or "файл"
     pending = get_state(chat_id)["pending"] or {}
 
+    if name.lower().endswith(".json") and pending.get("action") != "audio":
+        try:
+            data = download_file(doc.get("file_id"))
+            b = json.loads(data.decode("utf-8"))
+        except Exception as e:
+            return send(chat_id, "⚠️ Не разобрала файл: <code>{}</code>".format(esc(str(e)[:120])))
+        if not (isinstance(b, dict) and b.get("id") and b.get("units")):
+            return send(chat_id, "Это не похоже на карту учебника: нужны поля id и units.")
+        save_book(b)
+        u, l, w = book_stats(b)
+        return send(chat_id, "📕 <b>{}</b> загружен: {} юнитов, {} уроков, {} слов.".format(
+            esc(b["title"]), u, l, w), [[("Открыть", "bks_open:%s" % b["id"])]])
+
     if pending.get("action") == "audio":
         b = pending.get("book")
         code = pending.get("code")
@@ -5491,9 +5770,12 @@ def handle_document(chat_id, doc):
             "VALUES (?,?,?,?,?,?,?)",
             (b, code, pending.get("track", ""), doc.get("file_id"), "audio",
              name[:80], today().isoformat()))
-        set_state(chat_id, pending=None)
-        return send(chat_id, "🎧 Трек привязан к уроку {}.".format(code),
-                    [[("⬅️ К уроку", "book:%d" % pending.get("sid", 0))]])
+        n = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code=?", (b, code),
+              one=True)["c"]
+        return send(chat_id, "🎧 <b>{}</b> — привязан к уроку {} (всего {}).\n"
+                             "Можно прислать ещё, я жду.".format(esc(name[:60]), code, n),
+                    [[("✅ Хватит", "bka:%s:%d:%d" % (b, pending.get("unit", 1),
+                                                     pending.get("lesson", 1)))]])
 
     if pending.get("action") == "matfile":
         sid = pending.get("sid")
@@ -5539,6 +5821,13 @@ def handle(update):
         msg = update["message"]
         chat_id = msg["chat"]["id"]
         user_id = msg.get("from", {}).get("id")
+        if msg.get("audio") or msg.get("voice"):
+            if not is_owner(user_id):
+                return
+            a = msg.get("audio") or msg.get("voice")
+            a = dict(a)
+            a.setdefault("file_name", a.get("title") or "аудио")
+            return handle_document(chat_id, a)
         if msg.get("document") or msg.get("photo"):
             if not is_owner(user_id):
                 return
