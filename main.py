@@ -164,7 +164,7 @@ def tg(method, **params):
     return res2 if (res2.get("ok") or res2.get("description")) else res
 
 
-def send_document(chat_id, filename, content, caption=""):
+def send_document(chat_id, filename, content, caption="", mime=None):
     boundary = uuid.uuid4().hex
     body = io.BytesIO()
 
@@ -175,8 +175,12 @@ def send_document(chat_id, filename, content, caption=""):
     field("chat_id", str(chat_id))
     if caption:
         field("caption", caption)
+    if not mime:
+        mime = ("text/markdown; charset=utf-8" if filename.endswith(".md")
+                else "text/plain; charset=utf-8" if filename.endswith(".txt")
+                else "text/csv; charset=utf-8")
     body.write(("--%s\r\nContent-Disposition: form-data; name=\"document\"; filename=\"%s\"\r\n"
-                "Content-Type: text/csv\r\n\r\n" % (boundary, filename)).encode("utf-8"))
+                "Content-Type: %s\r\n\r\n" % (boundary, filename, mime)).encode("utf-8"))
     body.write(content.encode("utf-8-sig"))
     body.write(("\r\n--%s--\r\n" % boundary).encode("utf-8"))
     req = urllib.request.Request(API + "sendDocument", data=body.getvalue(), method="POST")
@@ -456,6 +460,7 @@ MIGRATIONS = [
     ("audio", "task", "TEXT"),
     ("audio", "answers", "TEXT"),
     ("audio", "sort", "INTEGER"),
+    ("hw_draft", "wb", "TEXT"),
     ("students", "keys", "INTEGER DEFAULT 0"),
     ("lessons", "reason", "TEXT"),
     ("payments", "receipt", "TEXT"),
@@ -1434,7 +1439,11 @@ def screen_book_lessons(bid, un, ln=0):
     tr = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, l["code"]))
     lines.append("Аудио: {}".format(", ".join(esc(t["name"] or t["track"] or "трек")
                                               for t in tr) if tr else "нет"))
-    rows = [[("✏️ Цель", "bks_f:%s:%d:%d:objective" % (bid, un, ln)),
+    rows = [[("🗂 План занятия", "bkg:%s:%d:%d:plan" % (bid, un, ln)),
+             ("🔥 Разминка", "bkg:%s:%d:%d:warm" % (bid, un, ln))],
+            [("🧩 Упражнения", "bkg:%s:%d:%d:ex" % (bid, un, ln)),
+             ("📝 Домашка", "bkg:%s:%d:%d:hw" % (bid, un, ln))],
+            [("✏️ Цель", "bks_f:%s:%d:%d:objective" % (bid, un, ln)),
              ("✏️ Грамматика", "bks_f:%s:%d:%d:grammar" % (bid, un, ln))],
             [("✏️ Название", "bks_f:%s:%d:%d:title" % (bid, un, ln)),
              ("✏️ Лексика урока", "bks_f:%s:%d:%d:vocabulary" % (bid, un, ln))],
@@ -1530,15 +1539,54 @@ def screen_hw_draft(sid):
     if ids:
         names = [audio_label(t) for t in tracks if t["id"] in ids]
         lines += ["", "🎧 Приложено: {}".format(esc(", ".join(names)) or len(ids))]
+    wb_line = draft_wb_text(sid)
+    if wb_line:
+        lines += ["", "📗 " + esc(wb_line)]
     rows = [[("🤖 Сгенерировать", "hwd_gen:%d" % sid),
              ("✏️ Переписать", "hwd_edit:%d" % sid)],
             [("➕ Дописать пункт", "hwd_add:%d" % sid),
              ("📚 Лексика урока", "hwd_voc:%d" % sid)]]
+    if l.get("wb_exercises"):
+        rows.append([("📗 Упражнения тетради ({})".format(len(l["wb_exercises"])),
+                      "hwd_wb:%d" % sid)])
     if tracks:
         rows.append([("🎧 Аудио ({} шт.)".format(len(tracks)), "hwd_audio:%d" % sid)])
     rows += [[("📤 Отправить ученику", "hwd_send:%d" % sid)],
              [("⬅️ К уроку", "book:%d" % sid)]]
     return "\n".join(lines), rows
+
+
+def screen_hw_wb(sid):
+    """Галочками отмечаем упражнения тетради к этому уроку."""
+    b = book_of(sid)
+    s = sget(sid)
+    un, ln = s["unit"] or 1, s["lesson"] or 1
+    l = lesson_of(b, un, ln)
+    ex = l.get("wb_exercises") or []
+    d = draft_get(sid, b["id"], l["code"])
+    picked = [x for x in ((d["wb"] if d else "") or "").split(",") if x]
+    if not ex:
+        return ("📗 Для этого урока упражнения тетради не распознаны.\n\n"
+                "Можно вписать их руками через «➕ Дописать пункт».",
+                [[("⬅️ Назад", "hwd:%d" % sid)]])
+    rows = [[("{} {}. {}".format("☑️" if str(e["n"]) in picked else "▫️", e["n"],
+                                 e["task"][:26]), "hwd_wbt:%d:%d" % (sid, e["n"]))]
+            for e in ex]
+    return ("📗 <b>Тетрадь, стр. {}</b>\nОтметьте, что задать на дом.".format(
+        l.get("wb_page", "—")), rows + [[("⬅️ Назад", "hwd:%d" % sid)]])
+
+
+def draft_wb_text(sid):
+    b = book_of(sid)
+    s = sget(sid)
+    l = lesson_of(b, s["unit"] or 1, s["lesson"] or 1)
+    d = draft_get(sid, b["id"], l["code"])
+    picked = [x for x in ((d["wb"] if d else "") or "").split(",") if x]
+    if not picked:
+        return ""
+    ex = {str(e["n"]): e for e in (l.get("wb_exercises") or [])}
+    parts = ["{}. {}".format(n, ex[n]["task"]) for n in picked if n in ex]
+    return "Workbook p. {}: {}".format(l.get("wb_page", "—"), "; ".join(parts))
 
 
 def screen_hw_audio(sid):
@@ -2950,6 +2998,28 @@ def split_keys(body):
     return body[:m.start()].rstrip(), body[m.end():].strip()
 
 
+def send_plan_file(chat_id, label, body, sid=None, prompt="", rows=None):
+    """План уходит файлом; ключи — отдельным сообщением под спойлером."""
+    task, keys = split_keys(body)
+    name = re.sub(r"[^\w.-]+", "_", label.split("·")[-1].strip())[:40] or "plan"
+    text = "# {}\n\n{}\n".format(label, task)
+    cap = "🗂 План занятия · {}".format(label)[:200]
+    ok_ = send_document(chat_id, "plan_{}.md".format(name), text, cap)
+    if not (ok_ or {}).get("ok"):
+        print("plan .md не принят:", (ok_ or {}).get("description"))
+        ok_ = send_document(chat_id, "plan_{}.txt".format(name), text, cap)
+    if not (ok_ or {}).get("ok"):
+        print("plan .txt не принят:", (ok_ or {}).get("description"))
+        for part in split_text(task):
+            send(chat_id, "🗂 <b>{}</b>\n\n{}".format(esc(label), esc(part)))
+    if prompt:
+        ai_remember(chat_id, prompt, body, "book:plan", sid)
+    send(chat_id, "🔑 <b>Ключи</b>\n\n<tg-spoiler>{}</tg-spoiler>".format(esc(keys))
+         if keys else "Ключей в плане нет.",
+         (rows or []) + [[("✏️ Дополнить или переделать", "airefine")]])
+    return True
+
+
 def send_with_keys(chat_id, head, body, prompt, kind, sid=None, extra_rows=None):
     """Задание — одним сообщением (можно переслать ученику), ключи — вторым, под спойлером."""
     task, keys = split_keys(body)
@@ -2960,38 +3030,45 @@ def send_with_keys(chat_id, head, body, prompt, kind, sid=None, extra_rows=None)
     return task, keys
 
 
-def ai_book_material(sid, kind, force=False):
-    """Материал по текущему уроку учебника. Возвращает (текст, промпт, из кэша)."""
-    b = book_of(sid)
-    if not b:
-        return None, "", False
-    s = sget(sid)
-    un, ln = s["unit"] or 1, s["lesson"] or 1
+def ai_lesson_material(b, un, ln, kind, force=False, sid=None, level=None):
+    """Материал по уроку учебника — можно и без ученика. → (текст, промпт, из кэша)."""
     l = lesson_of(b, un, ln)
     if not l:
         return None, "", False
-    code = "{}:{}".format(b["id"], l["code"])
+    if kind == "plan" and (b.get("audience") or "").startswith(("дошк", "перв")):
+        kind = "plan_kids"
     if not force:
         got = cache_get(b["id"], l["code"], kind)
         if got:
             return got, "", True
     title, task = BOOK_KINDS[kind]
     extra = ""
-    if kind in ("warm", "ex", "voc"):
+    if sid and kind in ("warm", "ex", "voc"):
         ws = [w["term"] for w in ex_words(sid, 8)]
         if ws:
             extra = "\nСлова ученика из его личного словаря: {}.".format(", ".join(ws))
+    who = ("Ученик: уровень {}.".format(level or (level_of(sid) if sid else ""))
+           if (sid or level) else "Группа детей, очное занятие.")
     prompt = ("Ты опытный преподаватель английского, готовишь материал к занятию.\n\n"
-              "{}\n\nУченик: уровень {}.{}\n\n{}\n\n"
+              "{}\n\n{}{}\n\n{}\n\n"
               "Правила: лексику бери только из лексики юнита, новые слова вводи лишь если "
               "задание прямо про дополнительную лексику; английский естественный; "
               "без markdown-звёздочек; сразу материал, без вступлений."
-              ).format(lesson_brief(b, un, ln), level_of(sid), extra, task)
+              ).format(lesson_brief(b, un, ln), who, extra, task)
     out = ai_complete(prompt, max_tokens=3500 if kind.startswith("plan") else 2200,
                       kind="book:" + kind, sid=sid)
     if out:
         cache_put(b["id"], l["code"], kind, out)
     return out, prompt, False
+
+
+def ai_book_material(sid, kind, force=False):
+    """То же, но для текущего урока конкретного ученика."""
+    b = book_of(sid)
+    if not b:
+        return None, "", False
+    s = sget(sid)
+    return ai_lesson_material(b, s["unit"] or 1, s["lesson"] or 1, kind, force, sid=sid)
 
 
 # --------------------------------------------------------------- Напоминания
@@ -4842,6 +4919,23 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = screen_hw_draft(sid)
         return edit(chat_id, message_id, t, r)
 
+    if cmd == "hwd_wb":
+        t, r = screen_hw_wb(sid)
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "hwd_wbt":
+        b = book_of(sid)
+        s_ = sget(sid)
+        l = lesson_of(b, s_["unit"] or 1, s_["lesson"] or 1)
+        d = draft_put(sid, b["id"], l["code"])
+        picked = [x for x in ((d["wb"] or "")).split(",") if x]
+        num = parts[2]
+        picked = [x for x in picked if x != num] if num in picked else picked + [num]
+        run("UPDATE hw_draft SET wb=? WHERE id=?", (",".join(picked), d["id"]))
+        toast(cq_id)
+        t, r = screen_hw_wb(sid)
+        return edit(chat_id, message_id, t, r)
+
     if cmd == "hwd_audio":
         t, r = screen_hw_audio(sid)
         return edit(chat_id, message_id, t, r)
@@ -4864,13 +4958,15 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         s_ = sget(sid)
         l = lesson_of(b, s_["unit"] or 1, s_["lesson"] or 1)
         d = draft_get(sid, b["id"], l["code"])
-        if not d or not (d["text"] or "").strip():
+        wb_line = draft_wb_text(sid)
+        body_text = "\n".join(x for x in [(d["text"] if d else "") or "", wb_line] if x.strip())
+        if not body_text.strip():
             return toast(cq_id, "Сначала наполните домашку")
         nxt = next_lesson_date(sid)
         run("INSERT INTO homework (student_id, text, due, created, done) VALUES (?,?,?,?,0)",
-            (sid, d["text"][:1500], nxt.isoformat() if nxt else None, today().isoformat()))
+            (sid, body_text[:1500], nxt.isoformat() if nxt else None, today().isoformat()))
         sent = notify_student(sid, "📝 <b>Homework</b>{}\n\n{}".format(
-            " for " + fmt_date(nxt) if nxt else "", esc(d["text"][:1500])))
+            " for " + fmt_date(nxt) if nxt else "", esc(body_text[:1500])))
         ids = [int(x) for x in (d["audio"] or "").split(",") if x.strip().isdigit()]
         st = sget(sid)
         for tid in ids:
@@ -4896,6 +4992,28 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "bks_units":
         t, r = screen_book_units(parts[1], int(parts[2]))
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "bkg":
+        bid, un, ln, kind = parts[1], int(parts[2]), int(parts[3]), parts[4]
+        b = BOOKS.get(bid)
+        if not b:
+            return toast(cq_id, "Учебник не найден")
+        l = lesson_of(b, un, ln)
+        label = "{} · {} {}".format(b["title"], l["code"], l["title"])
+        edit(chat_id, message_id, "{} — собираю…".format(BOOK_KINDS[kind][0]), [])
+        body, prompt, cached = ai_lesson_material(b, un, ln, kind)
+        if not body:
+            t, r = screen_book_lessons(bid, un, ln)
+            return edit(chat_id, message_id,
+                        "⚠️ Не вышло: {}\n\n".format(esc(AI_LAST["error"][:120] or "нет ИИ"))
+                        + t, r)
+        if kind == "plan":
+            send_plan_file(chat_id, label, body, None, prompt)
+        else:
+            send_with_keys(chat_id, "{} · {}\n\n".format(BOOK_KINDS[kind][0], esc(label)),
+                           body, prompt, "book:" + kind)
+        t, r = screen_book_lessons(bid, un, ln)
+        return send(chat_id, t, r)
 
     if cmd == "bks_les":
         t, r = screen_book_lessons(parts[1], int(parts[2]), int(parts[3]))
@@ -5108,17 +5226,9 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         if kind == "hw":
             rows.insert(0, [("📤 Отправить ученику", "bk_hw:%d" % sid)])
         if kind.startswith("plan"):
-            path = "/tmp/plan_{}.md".format(sid)
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("# {}\n\n{}\n".format(lesson_label(sid), body))
-                send_document(chat_id, "plan_{}.md".format(
-                    lesson_label(sid).split("·")[-1].strip().replace(" ", "_")[:30]),
-                    open(path, encoding="utf-8").read(),
-                    "🗂 {}".format(lesson_label(sid)))
-            except Exception as e:
-                print("plan file error:", e)
-        send_with_keys(chat_id, head, body, prompt, "book:" + kind, sid, extra_rows=rows)
+            send_plan_file(chat_id, lesson_label(sid), body, sid, prompt)
+        else:
+            send_with_keys(chat_id, head, body, prompt, "book:" + kind, sid, extra_rows=rows)
         t, r = screen_book(sid)
         return send(chat_id, t, r)
 

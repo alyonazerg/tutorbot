@@ -78,14 +78,40 @@
      "code": "1.3",
      "title": "Reading",
      "objective": "Text messages: interpret events; How do you learn best?",
-     "reading": "Text messages: interpret events; How do you learn best?"
+     "reading": "Text messages: interpret events; How do you learn best?",
+     "wb_page": 10,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the messages on Pupil"
+      },
+      {
+       "n": 2,
+       "task": "Write L"
+      },
+      {
+       "n": 3,
+       "task": "Say aloud"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "1.4",
      "title": "Grammar 2 / Language in use",
      "objective": "verb + …ing",
-     "grammar": "verb + …ing: I love skateboarding. I don't mind surfing."
+     "grammar": "verb + …ing: I love skateboarding. I don't mind surfing.",
+     "wb_page": 11,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Order the words to make questions"
+      },
+      {
+       "n": 3,
+       "task": "Answer the questions in Activity"
+      }
+     ]
     },
     {
      "n": 5,
@@ -93,14 +119,36 @@
      "title": "Listening & Speaking",
      "objective": "Ask questions about a holiday photo",
      "listening": "Listen for specific information",
-     "speaking": "Ask questions about a holiday photo"
+     "speaking": "Ask questions about a holiday photo",
+     "wb_page": 12,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Complete the dialogue"
+      },
+      {
+       "n": 3,
+       "task": "Look at the sentences"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "1.6",
      "title": "Writing",
      "objective": "Text messages: write messages",
-     "writing": "Text messages: write messages"
+     "writing": "Text messages: write messages",
+     "wb_page": 13,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Look and complete the sentences"
+      },
+      {
+       "n": 2,
+       "task": "Look at the sentences in Activity"
+      }
+     ]
     },
     {
      "n": 7,
@@ -206,14 +254,36 @@
      "code": "2.3",
      "title": "Reading",
      "objective": "A traditional story: identify speakers and events; asking classmates for help",
-     "reading": "A traditional story: identify speakers and events; asking classmates for help"
+     "reading": "A traditional story: identify speakers and events; asking classmates for help",
+     "wb_page": 20,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the story on Pupil"
+      },
+      {
+       "n": 3,
+       "task": "Say aloud"
+      },
+      {
+       "n": 4,
+       "task": "Write the missing letters"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "2.4",
      "title": "Grammar 2 / Language in use",
      "objective": "could / couldn't and when clauses in the past",
-     "grammar": "could / couldn't and when clauses in the past: Could you whistle a tune when you were eight?"
+     "grammar": "could / couldn't and when clauses in the past: Could you whistle a tune when you were eight?",
+     "wb_page": 21,
+     "wb_exercises": [
+      {
+       "n": 3,
+       "task": "Write questions"
+      }
+     ]
     },
     {
      "n": 5,
@@ -221,14 +291,32 @@
      "title": "Listening & Speaking",
      "objective": "Talk about your school",
      "listening": "Listen for specific information",
-     "speaking": "Talk about your school"
+     "speaking": "Talk about your school",
+     "wb_page": 22,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Complete the dialogue"
+      },
+      {
+       "n": 3,
+       "task": "Write questions"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "2.6",
      "title": "Writing",
      "objective": "A story: write a summary",
-     "writing": "A story: write a summary"
+     "writing": "A story: write a summary",
+     "wb_page": 23,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Match to make sentences"
+      }
+     ]
     },
     {
      "n": 7,
@@ -294,14 +382,40 @@
      "code": "3.3",
      "title": "Reading",
      "objective": "A leaflet: identify specific information; using what you know",
-     "reading": "A leaflet: identify specific information; using what you know"
+     "reading": "A leaflet: identify specific information; using what you know",
+     "wb_page": 30,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the leaflet on Pupil"
+      },
+      {
+       "n": 2,
+       "task": "Read and write T"
+      },
+      {
+       "n": 3,
+       "task": "Say aloud"
+      },
+      {
+       "n": 4,
+       "task": "Write the words with the letters s orc"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "3.4",
      "title": "Grammar 2 / Language in use",
      "objective": "Give directions",
-     "grammar": "Give directions: First, we go straight on to the hospital. And then, we turn right."
+     "grammar": "Give directions: First, we go straight on to the hospital. And then, we turn right.",
+     "wb_page": 31,
+     "wb_exercises": [
+      {
+       "n": 4,
+       "task": "Choose a sport and write four rules using must a"
+      }
+     ]
     },
     {
      "n": 5,
@@ -309,14 +423,40 @@
      "title": "Listening & Speaking",
      "objective": "Give directions",
      "listening": "Follow directions",
-     "speaking": "Give directions"
+     "speaking": "Give directions",
+     "wb_page": 32,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Label the pictures"
+      },
+      {
+       "n": 3,
+       "task": "Look at the map again and complete the direction"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "3.6",
      "title": "Writing",
      "objective": "A leaflet: write a list with bullet points",
-     "writing": "A leaflet: write a list with bullet points"
+     "writing": "A leaflet: write a list with bullet points",
+     "wb_page": 33,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Label the pictures"
+      },
+      {
+       "n": 2,
+       "task": "Match to make sentences on road safety"
+      },
+      {
+       "n": 3,
+       "task": "Write some road safety rules for cyclists"
+      }
+     ]
     },
     {
      "n": 7,
@@ -396,7 +536,18 @@
      "code": "4.3",
      "title": "Reading",
      "objective": "Blog posts: develop inferential skills; using prefixes to change meaning",
-     "reading": "Blog posts: develop inferential skills; using prefixes to change meaning"
+     "reading": "Blog posts: develop inferential skills; using prefixes to change meaning",
+     "wb_page": 40,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the blog posts on Pupil"
+      },
+      {
+       "n": 3,
+       "task": "Complete the words with or or er"
+      }
+     ]
     },
     {
      "n": 4,
@@ -411,14 +562,36 @@
      "title": "Listening & Speaking",
      "objective": "Talk about preferences",
      "listening": "Listen for opinions",
-     "speaking": "Talk about preferences"
+     "speaking": "Talk about preferences",
+     "wb_page": 42,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Complete the text"
+      },
+      {
+       "n": 3,
+       "task": "Look, read and write sentences"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "4.6",
      "title": "Writing",
      "objective": "A blog: write a blog post",
-     "writing": "A blog: write a blog post"
+     "writing": "A blog: write a blog post",
+     "wb_page": 43,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Look at the table and the correct answers to com"
+      },
+      {
+       "n": 2,
+       "task": "Complete the dialogue for Freddy"
+      }
+     ]
     },
     {
      "n": 7,
@@ -477,7 +650,22 @@
      "code": "5.3",
      "title": "Reading",
      "objective": "A magazine article: understand detail; asking questions",
-     "reading": "A magazine article: understand detail; asking questions"
+     "reading": "A magazine article: understand detail; asking questions",
+     "wb_page": 50,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Look at the quiz on Pupil"
+      },
+      {
+       "n": 3,
+       "task": "Say aloud"
+      },
+      {
+       "n": 4,
+       "task": "Write the words with the letters ph or gh"
+      }
+     ]
     },
     {
      "n": 4,
@@ -492,14 +680,32 @@
      "title": "Listening & Speaking",
      "objective": "A dialogue at the doctor's",
      "listening": "Listen for specific information",
-     "speaking": "A dialogue at the doctor's"
+     "speaking": "A dialogue at the doctor's",
+     "wb_page": 52,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Match to make sentences"
+      },
+      {
+       "n": 3,
+       "task": "Write a dialogue"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "5.6",
      "title": "Writing",
      "objective": "A letter: write a letter",
-     "writing": "A letter: write a letter"
+     "writing": "A letter: write a letter",
+     "wb_page": 53,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Complete the advice by circling the correct verb"
+      }
+     ]
     },
     {
      "n": 7,
@@ -576,7 +782,22 @@
      "code": "6.3",
      "title": "Reading",
      "objective": "A story: interpret stories; learning new vocabulary using colour",
-     "reading": "A story: interpret stories; learning new vocabulary using colour"
+     "reading": "A story: interpret stories; learning new vocabulary using colour",
+     "wb_page": 64,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the stories on Pupil"
+      },
+      {
+       "n": 4,
+       "task": "Say aloud"
+      },
+      {
+       "n": 5,
+       "task": "Write the words with the endings al or"
+      }
+     ]
     },
     {
      "n": 4,
@@ -591,14 +812,32 @@
      "title": "Listening & Speaking",
      "objective": "Act out a play",
      "listening": "Listen to sequence a story",
-     "speaking": "Act out a play"
+     "speaking": "Act out a play",
+     "wb_page": 66,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Read the answers and write the questions"
+      },
+      {
+       "n": 3,
+       "task": "Complete the dialogue"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "6.6",
      "title": "Writing",
      "objective": "A story: use adjectives and adverbs",
-     "writing": "A story: use adjectives and adverbs"
+     "writing": "A story: use adjectives and adverbs",
+     "wb_page": 67,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Write the dialogues"
+      }
+     ]
     },
     {
      "n": 7,
@@ -666,14 +905,40 @@
      "code": "7.3",
      "title": "Reading",
      "objective": "An information website: relate to your own knowledge; working out the meaning of words",
-     "reading": "An information website: relate to your own knowledge; working out the meaning of words"
+     "reading": "An information website: relate to your own knowledge; working out the meaning of words",
+     "wb_page": 74,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the text on Pupil"
+      },
+      {
+       "n": 2,
+       "task": "Match the types of pictures to the descriptions"
+      },
+      {
+       "n": 3,
+       "task": "Complete the words with double letters"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "7.4",
      "title": "Grammar 2 / Language in use",
      "objective": "Use possessive pronouns",
-     "grammar": "Use possessive pronouns: Is that your camera? Yes, it's mine."
+     "grammar": "Use possessive pronouns: Is that your camera? Yes, it's mine.",
+     "wb_page": 75,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Match to make sentences"
+      },
+      {
+       "n": 4,
+       "task": "Write sentences"
+      }
+     ]
     },
     {
      "n": 5,
@@ -681,14 +946,28 @@
      "title": "Listening & Speaking",
      "objective": "Give a presentation",
      "listening": "Listen for specific information",
-     "speaking": "Give a presentation"
+     "speaking": "Give a presentation",
+     "wb_page": 76,
+     "wb_exercises": [
+      {
+       "n": 3,
+       "task": "Write questions and answers"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "7.6",
      "title": "Writing",
      "objective": "An information text: include information",
-     "writing": "An information text: include information"
+     "writing": "An information text: include information",
+     "wb_page": 77,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Look at the information in the table and complet"
+      }
+     ]
     },
     {
      "n": 7,
@@ -761,14 +1040,40 @@
      "code": "8.3",
      "title": "Reading",
      "objective": "Poems: infer meaning; finding a word in a dictionary",
-     "reading": "Poems: infer meaning; finding a word in a dictionary"
+     "reading": "Poems: infer meaning; finding a word in a dictionary",
+     "wb_page": 84,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Write the number of the poem that tells us these"
+      },
+      {
+       "n": 3,
+       "task": "Find the gh words"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "8.4",
      "title": "Grammar 2 / Language in use",
      "objective": "Ask questions using will",
-     "grammar": "Ask questions using will: Will children still use books? No, they won't."
+     "grammar": "Ask questions using will: Will children still use books? No, they won't.",
+     "wb_page": 85,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Look and read the sentences"
+      },
+      {
+       "n": 3,
+       "task": "Look at the pictures and write about what will"
+      },
+      {
+       "n": 4,
+       "task": "Write sentences about the lifecycle of a ladybir"
+      }
+     ]
     },
     {
      "n": 5,
@@ -776,14 +1081,26 @@
      "title": "Listening & Speaking",
      "objective": "Play a game",
      "listening": "Listen to sequence information",
-     "speaking": "Play a game"
+     "speaking": "Play a game",
+     "wb_page": 86,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Write questions and sentences"
+      },
+      {
+       "n": 3,
+       "task": "Complete the dialogue"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "8.6",
      "title": "Writing",
      "objective": "A poem: write a poem",
-     "writing": "A poem: write a poem"
+     "writing": "A poem: write a poem",
+     "wb_page": 87
     },
     {
      "n": 7,
@@ -874,14 +1191,40 @@
      "code": "9.3",
      "title": "Reading",
      "objective": "A factual text: interpret data; the importance of graphs",
-     "reading": "A factual text: interpret data; the importance of graphs"
+     "reading": "A factual text: interpret data; the importance of graphs",
+     "wb_page": 94,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Answer the questions"
+      },
+      {
+       "n": 3,
+       "task": "Write the questions correctly"
+      }
+     ]
     },
     {
      "n": 4,
      "code": "9.4",
      "title": "Grammar 2 / Language in use",
      "objective": "What happens if + present simple",
-     "grammar": "What happens if + present simple: What happens if you put the marble in the water? It sinks."
+     "grammar": "What happens if + present simple: What happens if you put the marble in the water? It sinks.",
+     "wb_page": 95,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Order the words to make sentences about the wate"
+      },
+      {
+       "n": 3,
+       "task": "Look and write sentences"
+      },
+      {
+       "n": 4,
+       "task": "Complete the sentences for you"
+      }
+     ]
     },
     {
      "n": 5,
@@ -889,14 +1232,30 @@
      "title": "Listening & Speaking",
      "objective": "Talk about how you use water",
      "listening": "Listen for specific information",
-     "speaking": "Talk about how you use water"
+     "speaking": "Talk about how you use water",
+     "wb_page": 96
     },
     {
      "n": 6,
      "code": "9.6",
      "title": "Writing",
      "objective": "Diagrams: write a factual report",
-     "writing": "Diagrams: write a factual report"
+     "writing": "Diagrams: write a factual report",
+     "wb_page": 97,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Match the questions and answers"
+      },
+      {
+       "n": 2,
+       "task": "Complete the questions"
+      },
+      {
+       "n": 3,
+       "task": "Read the leaflet and write questions with How"
+      }
+     ]
     },
     {
      "n": 7,
@@ -1002,14 +1361,30 @@
      "code": "10.3",
      "title": "Reading",
      "objective": "Emails: infer meaning; self-motivation",
-     "reading": "Emails: infer meaning; self-motivation"
+     "reading": "Emails: infer meaning; self-motivation",
+     "wb_page": 104,
+     "wb_exercises": [
+      {
+       "n": 1,
+       "task": "Read the emails on Pupil"
+      },
+      {
+       "n": 2,
+       "task": "Read the emails on Pupil"
+      },
+      {
+       "n": 4,
+       "task": "Write two more words with the silent letters w, "
+      }
+     ]
     },
     {
      "n": 4,
      "code": "10.4",
      "title": "Grammar 2 / Language in use",
      "objective": "Ask What's the matter? and make suggestions",
-     "grammar": "Ask What's the matter? and make suggestions: I'm really tired. Let's do something relaxing."
+     "grammar": "Ask What's the matter? and make suggestions: I'm really tired. Let's do something relaxing.",
+     "wb_page": 105
     },
     {
      "n": 5,
@@ -1017,14 +1392,26 @@
      "title": "Listening & Speaking",
      "objective": "Tell a convincing story",
      "listening": "Listen to compare information",
-     "speaking": "Tell a convincing story"
+     "speaking": "Tell a convincing story",
+     "wb_page": 106,
+     "wb_exercises": [
+      {
+       "n": 2,
+       "task": "Match the problems and suggestions"
+      },
+      {
+       "n": 3,
+       "task": "Complete the dialogues"
+      }
+     ]
     },
     {
      "n": 6,
      "code": "10.6",
      "title": "Writing",
      "objective": "A story: write a story",
-     "writing": "A story: write a story"
+     "writing": "A story: write a story",
+     "wb_page": 107
     },
     {
      "n": 7,
