@@ -1255,6 +1255,36 @@ def screen_audio_fix(bid):
              [("⬅️ Назад", "bka_book:%s" % bid)]])
 
 
+def screen_audio_spread(bid, un, idx=0):
+    """По одному треку: жмёте номер урока — и он встаёт на место."""
+    b = BOOKS.get(bid)
+    u = unit_of(b, un)
+    tr = audio_sorted(bid, ["u{}".format(un)] + [l["code"] for l in u["lessons"]])
+    if not tr:
+        return ("🎯 В этом юните пока нет аудио.",
+                [[("⬅️ Назад", "bka:%s:%d:1" % (bid, un))]])
+    idx = max(0, min(idx, len(tr) - 1))
+    t = tr[idx]
+    where = "весь юнит" if (t["code"] or "").startswith("u") else "урок " + t["code"]
+    lines = ["🎯 <b>Разнести аудио — юнит {}</b>".format(un), "",
+             "Трек <b>{}</b> ({} из {})".format(audio_label(t), idx + 1, len(tr)),
+             "Сейчас: {}".format(where), "",
+             "Нажмите номер урока — трек встанет туда, откроется следующий."]
+    nums, row = [], []
+    for l in u["lessons"]:
+        row.append(("{} {}".format(l["n"], l["title"][:12]),
+                    "bka_put:%d:%d:%d" % (t["id"], l["n"], idx)))
+        if len(row) == 2:
+            nums.append(row)
+            row = []
+    if row:
+        nums.append(row)
+    return "\n".join(lines), nums + [
+        [("▶️ Послушать", "bka_send:%d" % t["id"]),
+         ("⏭ Пропустить", "bka_spread:%s:%d:%d" % (bid, un, idx + 1))],
+        [("⬅️ Выйти", "bka:%s:%d:1" % (bid, un))]]
+
+
 def screen_audio_item(tid):
     t = q("SELECT * FROM audio WHERE id=?", (tid,), one=True)
     if not t:
@@ -1456,7 +1486,8 @@ def screen_lesson_audio(bid, un, ln):
         lines.append("Пока ничего не загружено.")
     rows = [[("{}{}".format("📝 " if t["task"] else "🎧 ", audio_label(t)),
               "bka_item:%d" % t["id"])] for t in tr]
-    rows += [[("➕ Загрузить трек", "bka_add:%s:%d:%d" % (bid, un, ln))],
+    rows += [[("🎯 Разнести по урокам", "bka_spread:%s:%d:0" % (bid, un))],
+             [("➕ Загрузить трек", "bka_add:%s:%d:%d" % (bid, un, ln))],
              [("⬅️ Назад", "bks_les:%s:%d:%d" % (bid, un, ln))]]
     return "\n".join(lines), rows
 
@@ -1641,7 +1672,8 @@ def send_warmup(chat_id, sid, full=False, topic=""):
         if ai:
             head = "🔥 <b>Warm-up — {}</b>{}\n\n".format(
                 esc(sget(sid)["name"]), " · " + esc(topic) if topic else "")
-            return send_ai(chat_id, head + esc(ai), prompt, ai, "warmup", sid)
+            send_with_keys(chat_id, head, ai, prompt, "warmup", sid)
+            return True
         send(chat_id, "⚠️ ИИ не ответил ({}), собрала по шаблону.\n"
                       "Проверить связь: /aitest".format(esc(AI_LAST["error"][:120] or "—")))
     return send(chat_id, text_warmup(sid))
@@ -2902,6 +2934,30 @@ BOOK_KINDS = {
             "поговорки. Для каждой: единица — перевод на русский — пример предложения. "
             "Формат строк: единица | перевод | пример. Ничего лишнего."),
 }
+
+
+KEY_MARK = re.compile(r"^\s*(KEY|ANSWER KEY|ANSWERS|КЛЮЧИ|ОТВЕТЫ|Ключи|Ответы)\b\s*:?\s*$",
+                      re.M)
+
+
+def split_keys(body):
+    """Делит материал на задание и ключи. Возвращает (задание, ключи)."""
+    m = KEY_MARK.search(body or "")
+    if not m:
+        m = re.search(r"\n\s*(?:KEY|ANSWER KEY|КЛЮЧИ|ОТВЕТЫ)\b[:\s]", body or "")
+        if not m:
+            return body, ""
+    return body[:m.start()].rstrip(), body[m.end():].strip()
+
+
+def send_with_keys(chat_id, head, body, prompt, kind, sid=None, extra_rows=None):
+    """Задание — одним сообщением (можно переслать ученику), ключи — вторым, под спойлером."""
+    task, keys = split_keys(body)
+    send_ai(chat_id, head + esc(task), prompt, body, kind, sid, extra_rows=extra_rows)
+    if keys:
+        send(chat_id, "🔑 <b>Ключи и пояснения</b>\n\n<tg-spoiler>{}</tg-spoiler>".format(
+            esc(keys)))
+    return task, keys
 
 
 def ai_book_material(sid, kind, force=False):
@@ -4885,6 +4941,22 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = screen_audio_book(parts[1])
         return edit(chat_id, message_id, t, r)
 
+    if cmd == "bka_spread":
+        t, r = screen_audio_spread(parts[1], int(parts[2]), int(parts[3]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "bka_put":
+        t_ = q("SELECT * FROM audio WHERE id=?", (int(parts[1]),), one=True)
+        if not t_ or t_["book"] not in BOOKS:
+            return toast(cq_id, "Трек не найден")
+        un = int(t_["code"][1:]) if (t_["code"] or "").startswith("u") else \
+            int((t_["code"] or "1.1").split(".")[0])
+        run("UPDATE audio SET code=? WHERE id=?",
+            ("{}.{}".format(un, int(parts[2])), t_["id"]))
+        toast(cq_id, "→ урок {}.{}".format(un, parts[2]))
+        t, r = screen_audio_spread(t_["book"], un, int(parts[3]) + 1)
+        return edit(chat_id, message_id, t, r)
+
     if cmd == "bka_item":
         t, r = screen_audio_item(int(parts[1]))
         return edit(chat_id, message_id, t, r)
@@ -5035,7 +5107,18 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             rows.insert(0, [("📥 В словарь ученика", "bk_voc:%d" % sid)])
         if kind == "hw":
             rows.insert(0, [("📤 Отправить ученику", "bk_hw:%d" % sid)])
-        send_ai(chat_id, head + esc(body), prompt, body, "book:" + kind, sid, extra_rows=rows)
+        if kind.startswith("plan"):
+            path = "/tmp/plan_{}.md".format(sid)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("# {}\n\n{}\n".format(lesson_label(sid), body))
+                send_document(chat_id, "plan_{}.md".format(
+                    lesson_label(sid).split("·")[-1].strip().replace(" ", "_")[:30]),
+                    open(path, encoding="utf-8").read(),
+                    "🗂 {}".format(lesson_label(sid)))
+            except Exception as e:
+                print("plan file error:", e)
+        send_with_keys(chat_id, head, body, prompt, "book:" + kind, sid, extra_rows=rows)
         t, r = screen_book(sid)
         return send(chat_id, t, r)
 

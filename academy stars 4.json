@@ -7,6 +7,28 @@
  "note": "Лексика собрана из воркшитов распознаванием; основа — тема юнита из scope and sequence.",
  "units": [
   {
+   "n": 0,
+   "title": "Welcome",
+   "pb_page": 4,
+   "vocabulary_topic": "Describe people's lives and interests: sea animals, musical instruments, food, leisure activities, months",
+   "wordlist": [],
+   "lessons": [
+    {
+     "n": 1,
+     "code": "0.1",
+     "title": "Welcome",
+     "objective": "Повторение и знакомство: Describe people's lives and interests: sea animals, musical instruments, food, leisure activities, months",
+     "vocabulary": "Describe people's lives and interests: sea animals, musical instruments, food, leisure activities, months"
+    },
+    {
+     "n": 2,
+     "code": "0.2",
+     "title": "Welcome 2",
+     "objective": "Продолжение вводного раздела"
+    }
+   ]
+  },
+  {
    "n": 1,
    "title": "Holiday news",
    "pb_page": 8,
@@ -92,6 +114,27 @@
      "code": "1.8",
      "title": "Think about it!",
      "objective": "Let's do a survey"
+    },
+    {
+     "n": 9,
+     "code": "1.9",
+     "title": "Reading time 1",
+     "objective": "True travellers' tales of kindness",
+     "extra": true
+    },
+    {
+     "n": 10,
+     "code": "1.10",
+     "title": "Play 1",
+     "objective": "Jane and the special butterfly",
+     "extra": true
+    },
+    {
+     "n": 11,
+     "code": "1.11",
+     "title": "Think about it! 1",
+     "objective": "Let's do a survey",
+     "extra": true
     }
    ],
    "extras": "Reading time 1: True travellers' tales of kindness · Play 1: Jane and the special butterfly"
@@ -199,6 +242,13 @@
      "code": "2.8",
      "title": "Think about it!",
      "objective": "Appreciate how people make different choices"
+    },
+    {
+     "n": 9,
+     "code": "2.9",
+     "title": "Think about it! 2",
+     "objective": "Appreciate how people make different choices",
+     "extra": true
     }
    ]
   },
@@ -280,6 +330,27 @@
      "code": "3.8",
      "title": "Think about it!",
      "objective": "Play the Bike Grid game"
+    },
+    {
+     "n": 9,
+     "code": "3.9",
+     "title": "Reading time 2",
+     "objective": "Journey to the Centre of the Earth",
+     "extra": true
+    },
+    {
+     "n": 10,
+     "code": "3.10",
+     "title": "Play 2",
+     "objective": "Peter and the skateboarding competition",
+     "extra": true
+    },
+    {
+     "n": 11,
+     "code": "3.11",
+     "title": "Think about it! 3",
+     "objective": "Play the Bike Grid game",
+     "extra": true
     }
    ],
    "extras": "Reading time 2: Journey to the Centre of the Earth · Play 2: Peter and the skateboarding competition"
@@ -361,6 +432,13 @@
      "code": "4.8",
      "title": "Think about it!",
      "objective": "Let's find out: opinions about jobs"
+    },
+    {
+     "n": 9,
+     "code": "4.9",
+     "title": "Think about it! 4",
+     "objective": "Let's find out: opinions about jobs",
+     "extra": true
     }
    ]
   },
@@ -435,6 +513,13 @@
      "code": "5.8",
      "title": "Think about it!",
      "objective": "Plan healthy meals"
+    },
+    {
+     "n": 9,
+     "code": "5.9",
+     "title": "Think about it! 5",
+     "objective": "Plan healthy meals",
+     "extra": true
     }
    ]
   },
@@ -527,6 +612,13 @@
      "code": "6.8",
      "title": "Think about it!",
      "objective": "Play a storytelling game"
+    },
+    {
+     "n": 9,
+     "code": "6.9",
+     "title": "Think about it! 6",
+     "objective": "Play a storytelling game",
+     "extra": true
     }
    ]
   },
@@ -610,6 +702,27 @@
      "code": "7.8",
      "title": "Think about it!",
      "objective": "Compare and contrast devices"
+    },
+    {
+     "n": 9,
+     "code": "7.9",
+     "title": "Reading time 3",
+     "objective": "The colours of life",
+     "extra": true
+    },
+    {
+     "n": 10,
+     "code": "7.10",
+     "title": "Play 3",
+     "objective": "Vicky helps",
+     "extra": true
+    },
+    {
+     "n": 11,
+     "code": "7.11",
+     "title": "Think about it! 7",
+     "objective": "Compare and contrast devices",
+     "extra": true
     }
    ],
    "extras": "Reading time 3: The colours of life · Play 3: Vicky helps"
@@ -684,6 +797,13 @@
      "code": "8.8",
      "title": "Think about it!",
      "objective": "Predict the future of our world!"
+    },
+    {
+     "n": 9,
+     "code": "8.9",
+     "title": "Think about it! 8",
+     "objective": "Predict the future of our world!",
+     "extra": true
     }
    ]
   },
@@ -790,6 +910,27 @@
      "code": "9.8",
      "title": "Think about it!",
      "objective": "Plan a campaign"
+    },
+    {
+     "n": 9,
+     "code": "9.9",
+     "title": "Reading time 4",
+     "objective": "Unusual hotels",
+     "extra": true
+    },
+    {
+     "n": 10,
+     "code": "9.10",
+     "title": "Play 4",
+     "objective": "Freddy's music",
+     "extra": true
+    },
+    {
+     "n": 11,
+     "code": "9.11",
+     "title": "Think about it! 9",
+     "objective": "Plan a campaign",
+     "extra": true
     }
    ],
    "extras": "Reading time 4: Unusual hotels · Play 4: Freddy's music"
@@ -897,8 +1038,17 @@
      "code": "10.8",
      "title": "Think about it!",
      "objective": "Play the Are you a superstar? game"
+    },
+    {
+     "n": 9,
+     "code": "10.9",
+     "title": "Think about it! 10",
+     "objective": "Play the Are you a superstar? game",
+     "extra": true
     }
    ]
   }
- ]
+ ],
+ "components": "Pupil's Book и Workbook",
+ "audio_scope": "unit"
 }
