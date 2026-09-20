@@ -1087,6 +1087,13 @@ def screen_study_menu(sid):
         [("⬅️ Назад", "st:%d" % sid)]]
 
 
+def unit_scope(book):
+    """В детских курсах номер трека — это «юнит.номер», аудио общее на весь юнит."""
+    if book.get("audio_scope"):
+        return book["audio_scope"] == "unit"
+    return not any(l.get("tracks") for u in book["units"] for l in u["lessons"])
+
+
 def audio_match(book, name):
     """По имени файла определяет источник (PB/WB), номер трека и урок."""
     n = " " + re.sub(r"[_\-]+", " ", name or "").lower() + " "
@@ -1107,22 +1114,28 @@ def audio_match(book, name):
         n = n.replace(mt.group(0), " ")
     code = None
     # урок по номеру трека из книги учителя
-    has_map = any(l.get("tracks") for u in book["units"] for l in u["lessons"])
+    has_map = not unit_scope(book)
     if track:
         for u in book["units"]:
             for l in u["lessons"]:
                 if track in (l.get("tracks") or []):
                     code = l["code"]
         if not code and not has_map:
-            # в детских курсах номер трека — это «юнит.номер»
+            # в детских курсах номер трека — это «юнит.номер», привязываем к юниту
             un_ = int(track.split(".")[0])
-            if unit_of(book, un_):
-                code = "{}.1".format(un_)
+            if unit_of(book, un_) is not None:
+                code = "u{}".format(un_)
     # явный код урока: 3.2, unit 3 lesson 2, u3l2
     if not code:
-        m = re.search(r"\b(\d{1,2})\s?[.．]\s?(\d)\b(?!\d)", n)
-        if m and lesson_of(book, int(m.group(1)), int(m.group(2))):
-            code = "{}.{}".format(int(m.group(1)), int(m.group(2)))
+        m = re.search(r"\b(\d{1,2})\s?[.．]\s?(\d{1,2})\b(?!\d)", n)
+        if m:
+            un_, ln_ = int(m.group(1)), int(m.group(2))
+            if has_map and lesson_of(book, un_, ln_):
+                code = "{}.{}".format(un_, ln_)
+            elif unit_of(book, un_) is not None:
+                # детские курсы: 1.9 — это юнит 1, трек 9
+                code = "u{}".format(un_)
+                track = track or "{}.{}".format(un_, ln_)
     if not code:
         m2 = re.search(r"\bu(?:nit)?\s*(\d{1,2}).{0,12}?\bl(?:esson)?\s*(\d{1,2})\b", n)
         if m2 and lesson_of(book, int(m2.group(1)), int(m2.group(2))):
@@ -1190,17 +1203,27 @@ def screen_audio_book(bid):
     by = {}
     for r in known:
         by.setdefault(r["code"], []).append(r)
-    for code in sorted(by, key=lambda c: [int(x) for x in c.split(".")])[:12]:
+    def ckey(c):
+        try:
+            return [int(x) for x in c.lstrip("u").split(".")]
+        except ValueError:
+            return [99]
+    for code in sorted(by, key=ckey)[:12]:
         srcs = {}
         for t in by[code]:
             srcs[t["kind"] if t["kind"] in ("PB", "WB", "TB") else "—"] = \
                 srcs.get(t["kind"] if t["kind"] in ("PB", "WB", "TB") else "—", 0) + 1
-        lines.append("• {} — {}".format(code, ", ".join(
+        lines.append("• {} — {}".format(
+            "юнит " + code[1:] if code.startswith("u") else code, ", ".join(
             "{} {}".format(k, v) for k, v in sorted(srcs.items()))))
     if len(by) > 12:
         lines.append("… и ещё {} уроков".format(len(by) - 12))
-    missing = [l["code"] for u in b["units"] for l in u["lessons"]
-               if not any(r["code"] == l["code"] for r in known)]
+    if unit_scope(b):
+        missing = ["юнит {}".format(u["n"]) for u in b["units"]
+                   if not any(r["code"] == "u{}".format(u["n"]) for r in known)]
+    else:
+        missing = [l["code"] for u in b["units"] for l in u["lessons"]
+                   if not any(r["code"] == l["code"] for r in known)]
     if missing:
         lines += ["", "Без аудио пока: {}{}".format(
             ", ".join(missing[:14]), " …" if len(missing) > 14 else "")]
@@ -1224,8 +1247,8 @@ def screen_audio_fix(bid):
     left = q("SELECT COUNT(*) c FROM audio WHERE book=? AND (code IS NULL OR code='')",
              (bid,), one=True)["c"]
     return ("❓ <b>{}</b>\n\nК какому уроку отнести? Осталось разобрать: {}.\n"
-            "Пришлите код урока сообщением — например <code>3.2</code>, "
-            "или <code>WB 3.2</code>, если это трек из рабочей тетради.".format(
+            "Пришлите код: <code>3.2</code> — урок, <code>3</code> — весь юнит, "
+            "можно с меткой: <code>WB 3</code>.".format(
                 esc(r["name"] or "трек"), left),
             [[("▶️ Послушать", "bka_send:%d" % r["id"])],
              [("🗑 Удалить", "bka_del:%d" % r["id"])],
@@ -1237,17 +1260,25 @@ def screen_audio_item(tid):
     if not t:
         return "Трек не найден.", [[("⬅️ Назад", "books")]]
     b = BOOKS.get(t["book"]) or {"title": t["book"], "units": []}
+    where = ("юнит " + t["code"][1:]) if (t["code"] or "").startswith("u") else \
+        ("урок " + (t["code"] or "—"))
     lines = ["🎧 <b>{}</b>".format(esc(t["name"] or t["track"] or "трек")), "",
-             "{} · урок {}{}".format(esc(b.get("title", "")), t["code"] or "—",
-                                     " · " + t["kind"] if t["kind"] in ("PB", "WB", "TB") else "")]
+             "{} · {}{}".format(esc(b.get("title", "")), where,
+                                " · " + t["kind"] if t["kind"] in ("PB", "WB", "TB") else "")]
     lines += ["", "<b>Задание</b>", esc(t["task"]) if t["task"] else "<i>не задано</i>"]
     lines += ["", "<b>Ключи</b> <i>(только для вас)</i>",
               esc(t["answers"]) if t["answers"] else "<i>нет</i>"]
     un = ln = 1
-    for u in b.get("units", []):
-        for l in u["lessons"]:
-            if l["code"] == t["code"]:
-                un, ln = u["n"], l["n"]
+    if (t["code"] or "").startswith("u"):
+        try:
+            un, ln = int(t["code"][1:]), 1
+        except ValueError:
+            pass
+    else:
+        for u in b.get("units", []):
+            for l in u["lessons"]:
+                if l["code"] == t["code"]:
+                    un, ln = u["n"], l["n"]
     return "\n".join(lines), [
         [("▶️ Послушать", "bka_send:%d" % tid)],
         [("🤖 Сгенерировать задание", "bka_gen:%d" % tid)],
@@ -1389,8 +1420,15 @@ def audio_label(t):
     return " ".join(x for x in (src, num) if x) or (t["name"] or "трек")[:20]
 
 
+def audio_for(bid, un, code):
+    """Все записи, относящиеся к уроку: свои плюс общие для юнита."""
+    return audio_sorted(bid, [code, "u{}".format(un)])
+
+
 def audio_sorted(bid, code):
-    rows_ = q("SELECT * FROM audio WHERE book=? AND code=? ORDER BY id", (bid, code))
+    codes = code if isinstance(code, (list, tuple)) else [code]
+    rows_ = q("SELECT * FROM audio WHERE book=? AND code IN ({})".format(
+        ",".join("?" * len(codes))), tuple([bid] + list(codes)))
 
     def key(t):
         try:
@@ -1404,8 +1442,9 @@ def audio_sorted(bid, code):
 def screen_lesson_audio(bid, un, ln):
     b = BOOKS.get(bid)
     l = lesson_of(b, un, ln)
-    tr = audio_sorted(bid, l["code"])
-    lines = ["🎧 <b>Аудио к уроку {} {}</b>".format(l["code"], esc(l["title"])), ""]
+    tr = audio_for(bid, un, l["code"])
+    lines = ["🎧 <b>Аудио — юнит {}</b>".format(un),
+             "<i>{} {}</i>".format(l["code"], esc(l["title"])), ""]
     if tr:
         by = {}
         for t in tr:
@@ -1453,7 +1492,7 @@ def screen_hw_draft(sid):
     d = draft_get(sid, b["id"], l["code"])
     body = (d["text"] if d else "") or ""
     ids = [int(x) for x in (d["audio"] if d else "").split(",") if x.strip().isdigit()]
-    tracks = audio_sorted(b["id"], l["code"])
+    tracks = audio_for(b["id"], un, l["code"])
     lines = ["📝 <b>Домашка — {}</b>".format(esc(s["name"])),
              "{} · {} {}".format(esc(b["title"]), l["code"], esc(l["title"])), ""]
     lines.append(esc(body) if body else "<i>Пока пусто. Сгенерируйте или напишите сами.</i>")
@@ -1479,7 +1518,7 @@ def screen_hw_audio(sid):
     l = lesson_of(b, s["unit"] or 1, s["lesson"] or 1)
     d = draft_get(sid, b["id"], l["code"])
     ids = [int(x) for x in (d["audio"] if d else "").split(",") if x.strip().isdigit()]
-    tracks = audio_sorted(b["id"], l["code"])
+    tracks = audio_for(b["id"], s["unit"] or 1, l["code"])
     rows = [[("{} {}{}".format("☑️" if t["id"] in ids else "▫️", audio_label(t),
                                " 📝" if t["task"] else ""),
               "hwd_atog:%d:%d" % (sid, t["id"]))] for t in tracks]
@@ -1509,21 +1548,40 @@ def screen_book(sid):
     u, l = unit_of(b, un), lesson_of(b, un, ln)
     lines = ["📕 <b>{}</b> · {} мин".format(esc(b["title"]), b.get("lesson_minutes", 60)), ""]
     if u and l:
-        lines += ["Юнит {}: <b>{}</b>".format(u["n"], esc(u["title"])),
+        lines += ["Юнит {}: <b>{}</b>{}".format(
+                      u["n"], esc(u["title"]),
+                      " · стр. {}".format(u["pb_page"]) if u.get("pb_page") else ""),
                   "Урок <b>{} {}</b>".format(l["code"], esc(l["title"])),
                   "Цель: {}".format(esc(l.get("objective", "—")))]
-        for key, name in (("grammar", "Грамматика"), ("vocabulary", "Лексика"),
-                          ("functional", "Функциональный язык"), ("writing", "Письмо"),
-                          ("speaking", "Говорение"), ("phonics", "Фонетика")):
+        for key, name in (("grammar", "Грамматика"), ("functional", "Функциональный язык"),
+                          ("reading", "Чтение"), ("listening", "Аудирование"),
+                          ("writing", "Письмо"), ("speaking", "Говорение"),
+                          ("phonics", "Фонетика")):
             if l.get(key):
                 lines.append("{}: {}".format(name, esc(l[key])))
+        wl = u.get("wordlist") or []
+        if wl:
+            groups = u.get("word_groups") or []
+            lines += ["", "<b>Целевая лексика юнита</b>{}".format(
+                " · " + esc(", ".join(groups)) if groups else "")]
+            shown = wl[:24]
+            lines.append(esc(", ".join(shown)) + (" …" if len(wl) > len(shown) else ""))
+        elif u.get("vocabulary_topic"):
+            lines += ["", "Лексика юнита: {}".format(esc(u["vocabulary_topic"]))]
+        # грамматика юнита целиком — если у самого урока её нет
+        if not l.get("grammar"):
+            gr = [x.get("grammar") for x in u["lessons"] if x.get("grammar")]
+            if gr:
+                lines += ["", "Грамматика юнита: {}".format(esc("; ".join(gr[:2])))]
+        tail = []
         if l.get("wb_page"):
-            lines.append("Тетрадь: стр. {}".format(l["wb_page"]))
-        have = q("SELECT COUNT(*) c FROM audio WHERE book=? AND code=?",
-                 (b["id"], l["code"]), one=True)["c"]
-        if have or l.get("tracks"):
-            lines.append("Аудио: {}".format("{} шт. ✅".format(have) if have
-                                            else "не загружено"))
+            tail.append("тетрадь стр. {}".format(l["wb_page"]))
+        have = len(audio_for(b["id"], un, l["code"]))
+        tail.append("аудио {}".format("{} ✅".format(have) if have else "нет"))
+        d = draft_get(sid, b["id"], l["code"])
+        if d and (d["text"] or "").strip():
+            tail.append("домашка готова")
+        lines += ["", "<i>{}</i>".format(esc(" · ".join(tail)))]
     kids = (b.get("audience") or "").startswith(("дошк", "перв"))
     rows = [[("🗂 План занятия" if kids else "🗂 Lesson plan", "bk_go:%d:plan" % sid),
              ("🔥 Разминка", "bk_go:%d:warm" % sid)],
@@ -1934,14 +1992,18 @@ def ai_probe():
             "<code>AI_MODEL</code>.".format("\n".join(report)))
 
 
-def ai_complete(prompt, max_tokens=900, kind="misc", sid=None):
+def ai_complete(prompt, max_tokens=900, kind="misc", sid=None, timeout=None):
     """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
     ok, why = ai_allowed()
     if not ok:
         ai_note(kind, why)
         return None
     fmt, url, model = ai_conf()
-    out, u, err = ai_call(prompt, max_tokens, fmt, url, model)
+    tmo = timeout or (240 if max_tokens > 2000 else 120)
+    out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo)
+    if not out and "timed out" in err.lower():
+        print("AI timeout, повтор")
+        out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo)
     if u:
         ai_log(kind, sid, u.get("input_tokens", u.get("prompt_tokens", 0)),
                u.get("output_tokens", u.get("completion_tokens", 0)))
@@ -4846,7 +4908,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "bka_move":
         set_state(chat_id, pending={"action": "audiomove", "tid": int(parts[1])})
         return edit(chat_id, message_id,
-                    "📍 В какой урок перенести? Пришлите код, например <code>3.2</code>.",
+                    "📍 Куда перенести? Пришлите код урока <code>3.2</code> "
+                    "или номер юнита <code>3</code>, если запись на весь юнит.",
                     [[("⬅️ Назад", "bka_item:%s" % parts[1])]])
 
     if cmd == "bka_sort":
@@ -5295,10 +5358,14 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         t_ = q("SELECT * FROM audio WHERE id=?", (pending["tid"],), one=True)
         b = BOOKS.get(t_["book"]) if t_ else None
         m = re.search(r"(\d{1,2})[.\s](\d{1,2})", text)
-        if not b or not m or not lesson_of(b, int(m.group(1)), int(m.group(2))):
-            return send(chat_id, "Не нашла такой урок. Пришлите код вида <code>3.2</code>.")
-        run("UPDATE audio SET code=? WHERE id=?",
-            ("{}.{}".format(int(m.group(1)), int(m.group(2))), pending["tid"]))
+        mu = re.match(r"\s*(\d{1,2})\s*$", text)
+        if b and mu and unit_of(b, int(mu.group(1))) is not None:
+            new_code = "u{}".format(int(mu.group(1)))
+        elif b and m and lesson_of(b, int(m.group(1)), int(m.group(2))):
+            new_code = "{}.{}".format(int(m.group(1)), int(m.group(2)))
+        else:
+            return send(chat_id, "Не нашла. Пришлите <code>3.2</code> или <code>3</code>.")
+        run("UPDATE audio SET code=? WHERE id=?", (new_code, pending["tid"]))
         set_state(chat_id, pending=None)
         t, r = screen_audio_item(pending["tid"])
         return send(chat_id, "✅ Перенесла.\n\n" + t, r)
@@ -5315,10 +5382,16 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         m = re.search(r"\b(wb|pb|sb|tb)\b", text, re.I)
         if m:
             src = m.group(1).upper()
-        mc = re.search(r"(\d{1,2})[.\s](\d)", text)
-        if not mc or not lesson_of(b, int(mc.group(1)), int(mc.group(2))):
-            return send(chat_id, "Не нашла такой урок. Пришлите код вида <code>3.2</code>.")
-        code = "{}.{}".format(int(mc.group(1)), int(mc.group(2)))
+        mc = re.search(r"(\d{1,2})[.](\d{1,2})", text)
+        mu = re.search(r"(?:^|\s)(\d{1,2})(?:\s|$)", text)
+        if mc and lesson_of(b, int(mc.group(1)), int(mc.group(2))):
+            code = "{}.{}".format(int(mc.group(1)), int(mc.group(2)))
+        elif mc and unit_of(b, int(mc.group(1))) is not None:
+            code = "u{}".format(int(mc.group(1)))
+        elif mu and unit_of(b, int(mu.group(1))) is not None:
+            code = "u{}".format(int(mu.group(1)))
+        else:
+            return send(chat_id, "Не нашла. Пришлите <code>3.2</code> или <code>3</code>.")
         run("UPDATE audio SET code=?, kind=COALESCE(NULLIF(?,''),kind) WHERE id=?",
             (code, src, r_["id"]))
         left = q("SELECT COUNT(*) c FROM audio WHERE book=? AND (code IS NULL OR code='')",
