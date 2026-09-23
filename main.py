@@ -1386,6 +1386,7 @@ def screen_book_admin(bid):
         lines.append("Занимаются: {}".format(esc(", ".join(r["name"] for r in who))))
     rows = [[("📚 Юниты и лексика", "bks_units:%s:0" % bid)],
             [("🎧 Загрузить аудио пачкой", "bka_bulk:%s" % bid)],
+            [("🧨 Удалить всё аудио", "bka_wipe:%s" % bid)],
             [("🗑 Удалить учебник", "bks_del:%s" % bid)],
             [("⬅️ Назад", "books")]]
     return "\n".join(lines), rows
@@ -2938,34 +2939,31 @@ def cache_put(book, code, kind, body):
 
 
 BOOK_KINDS = {
-    "plan": ("🗂 Lesson plan", "Write a STEP-BY-STEP teacher's script for this lesson IN "
-             "ENGLISH, detailed enough to teach from without opening the Teacher's Book.\n"
-             "Start with PREPARE: what to have ready (pages, audio, board, printouts).\n"
-             "Then numbered steps, each with: minutes, stage name, the exact words the "
-             "teacher says in quotation marks, what goes on the board, which page and "
-             "exercise number, what students do, interaction (T-S, pairs, groups), and how "
-             "you know they got it — concept questions with expected answers, instruction "
-             "check questions. Show the transition sentence between steps. Keep every "
-             "instruction one short sentence.\n"
-             "Timings must add up to the lesson length exactly.\n"
-             "Finish with ANSWER KEY — answers to every task in the plan and the expected "
-             "answers or target language for the coursebook exercises you refer to; mark "
-             "with (?) anything you cannot be sure of and point to the Teacher's Book page "
-             "instead of inventing. Then ANTICIPATED PROBLEMS with solutions."),
-    "plan_kids": ("🗂 План занятия", "Составь пошаговый сценарий занятия для офлайн-урока "
-                  "с маленькими детьми — так, чтобы вести прямо по нему, не открывая книгу "
-                  "учителя.\n"
-                  "Сначала блок PREPARE: что принести, распечатать, какие карточки и "
-                  "игрушки приготовить, какие аудио включить.\n"
-                  "Дальше пронумерованные шаги, у каждого: минуты, название этапа, "
-                  "ТОЧНЫЕ фразы преподавателя на английском в кавычках, что показываете и "
-                  "куда, что делают дети, страница книги и номер упражнения, номер аудио. "
-                  "Между шагами — фраза-переход. Пояснения преподавателю по-русски, всё "
-                  "обращённое к детям — по-английски.\n"
-                  "Минуты должны в сумме дать длительность занятия.\n"
-                  "В конце блок КЛЮЧИ — ответы ко всем заданиям плана и ожидаемые ответы "
-                  "к упражнениям учебника; где не уверен — ставь (?) и отсылай к книге "
-                  "учителя."),
+    "plan": ("🗂 Lesson plan", "Write a SHORT schematic lesson plan in English — a working "
+             "outline, not prose. Start with PREPARE: one line listing pages, audio and "
+             "anything to print. Then one line per stage in the format:\n"
+             "5'   stage — what happens, page and exercise, interaction\n"
+             "Use the actual lesson length; 6–9 lines total; keep each line under 120 "
+             "characters; include the teacher's key question or instruction in quotes where "
+             "it matters. End with HW: one line. Then ANSWER KEY with answers to the "
+             "exercises you refer to, marking anything uncertain with (?)."),
+    "plan_kids": ("🗂 План занятия", "Составь план очного занятия для маленьких детей "
+                  "строго в таком формате: каждая строка начинается со знака / и содержит "
+                  "один короткий шаг. Пиши так, как преподаватель говорит на уроке.\n\n"
+                  "Образец формата:\n"
+                  "/ count 1–6 and back 6–1.\n"
+                  "/ number flashcards, random order. They say the number.\n"
+                  "/ pb p8 ex 1. Where's Polly? Point. Where's …? (other characters)\n"
+                  "/ realia: chair, pencil, crayon. Point to a chair!\n"
+                  "/ pb p8 ex 1. Listen and point. Then listen, point and say.\n"
+                  "/ 2 teams. Touch the desk! First one wins a point.\n"
+                  "/ ab p8 ex 1. Find the pencil case. Circle it. What is it?\n"
+                  "/ Goodbye, Polly!\n\n"
+                  "Правила: всё, что говорится детям, — по-английски, коротко, командами; "
+                  "ссылки на книги в виде pb p8 ex 1 и ab p8 ex 1; уместные эмодзи можно; "
+                  "18–24 строки, чтобы уложиться в длительность занятия; сначала строка "
+                  "PREPARE: с материалами, в конце строка HW: если задаём. "
+                  "Никаких вступлений, пояснений и таймингов в скобках — только строки."),
     "warm": ("🔥 Разминка", "Составь разминку на 5–7 минут к этому уроку: два вопроса для "
              "устного старта, шесть предложений gap-fill (пропуск ______) на лексике юнита, "
              "четыре предложения на грамматику урока и ключи. Задания — на английском, "
@@ -2998,20 +2996,91 @@ def split_keys(body):
     return body[:m.start()].rstrip(), body[m.end():].strip()
 
 
+def tph_token():
+    """Аккаунт telegra.ph для публикации планов. Создаётся один раз."""
+    tok = meta_get("tph_token")
+    if tok:
+        return tok
+    try:
+        data = urllib.parse.urlencode({"short_name": "tutorbot",
+                                       "author_name": "What's next?"}).encode()
+        with urllib.request.urlopen("https://api.telegra.ph/createAccount", data,
+                                    timeout=30) as r:
+            res = json.loads(r.read().decode("utf-8"))
+        tok = (res.get("result") or {}).get("access_token")
+        if tok:
+            meta_set("tph_token", tok)
+        return tok
+    except Exception as e:
+        print("telegraph account error:", e)
+        meta_set("tph_error", "{}: {}".format(type(e).__name__, e)[:200])
+        return None
+
+
+def tph_nodes(text):
+    """Текст плана → узлы страницы: заголовки, списки, абзацы."""
+    nodes = []
+    for raw in (text or "").split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        clean = line.strip().strip("*# ")
+        letters = [c for c in clean if c.isalpha()]
+        is_head = (clean.endswith(":") and len(clean) < 60) or (
+            letters and all(c.isupper() for c in letters) and len(clean) < 60)
+        if is_head:
+            nodes.append({"tag": "h4", "children": [clean.rstrip(":")]})
+        elif re.match(r"^\s*(\d+[.)]|[-•/])\s+", line):
+            nodes.append({"tag": "p", "children": [clean]})
+        else:
+            nodes.append({"tag": "p", "children": [clean]})
+    return nodes or [{"tag": "p", "children": ["—"]}]
+
+
+def tph_page(title, text):
+    """Публикует план на telegra.ph и возвращает ссылку."""
+    tok = tph_token()
+    if not tok:
+        return None
+    try:
+        data = urllib.parse.urlencode({
+            "access_token": tok, "title": title[:200], "author_name": "What's next?",
+            "content": json.dumps(tph_nodes(text), ensure_ascii=False),
+            "return_content": "false"}).encode("utf-8")
+        with urllib.request.urlopen("https://api.telegra.ph/createPage", data,
+                                    timeout=40) as r:
+            res = json.loads(r.read().decode("utf-8"))
+        if not res.get("ok"):
+            print("telegraph createPage:", res.get("error"))
+            meta_set("tph_error", str(res.get("error"))[:200])
+            return None
+        return (res.get("result") or {}).get("url")
+    except Exception as e:
+        print("telegraph page error:", e)
+        return None
+
+
 def send_plan_file(chat_id, label, body, sid=None, prompt="", rows=None):
     """План уходит файлом; ключи — отдельным сообщением под спойлером."""
     task, keys = split_keys(body)
     name = re.sub(r"[^\w.-]+", "_", label.split("·")[-1].strip())[:40] or "plan"
     text = "# {}\n\n{}\n".format(label, task)
     cap = "🗂 План занятия · {}".format(label)[:200]
-    ok_ = send_document(chat_id, "plan_{}.md".format(name), text, cap)
-    if not (ok_ or {}).get("ok"):
-        print("plan .md не принят:", (ok_ or {}).get("description"))
-        ok_ = send_document(chat_id, "plan_{}.txt".format(name), text, cap)
-    if not (ok_ or {}).get("ok"):
-        print("plan .txt не принят:", (ok_ or {}).get("description"))
-        for part in split_text(task):
-            send(chat_id, "🗂 <b>{}</b>\n\n{}".format(esc(label), esc(part)))
+    url = tph_page("План · {}".format(label), task)
+    delivered = False
+    if url:
+        send(chat_id, "🗂 <b>План занятия</b>\n{}\n\n{}".format(esc(label), url))
+        delivered = True
+    res = send_document(chat_id, "plan_{}.md".format(name), text, cap)
+    if not (res or {}).get("ok"):
+        res = send_document(chat_id, "plan_{}.txt".format(name), text, cap)
+    if not (res or {}).get("ok"):
+        why = (res or {}).get("description") or "нет ответа"
+        print("sendDocument отказ:", why)
+        if not delivered:
+            send(chat_id, "⚠️ Файл не отправился: <code>{}</code>".format(esc(str(why)[:150])))
+            for part in split_text(task):
+                send(chat_id, "🗂 <b>{}</b>\n\n{}".format(esc(label), esc(part)))
     if prompt:
         ai_remember(chat_id, prompt, body, "book:plan", sid)
     send(chat_id, "🔑 <b>Ключи</b>\n\n<tg-spoiler>{}</tg-spoiler>".format(esc(keys))
@@ -3615,7 +3684,7 @@ def screen_ex(sid, mode="choice"):
             use = mode if mode in modes else modes[0]
             mark = "" if use == mode else (" · 🔘" if use == "choice" else " · ✍️")
             rows.append([("{}{}".format(title, mark),
-                          "lrn_exgo:%d:%s:%s" % (sid, k, use))])
+                          "lrn_exask:%d:%s:%s" % (sid, k, use))])
     rows.append([("⬅️ Назад", "lrn:%d" % sid)])
     return "\n".join(lines), rows
 
@@ -3630,7 +3699,7 @@ def screen_ex_q(sid, st):
     for n, opt in enumerate(it["options"]):
         body.append("<b>{}.</b> {}".format(LETTERS[n], esc(opt)))
     rows = [[(LETTERS[n], "lrn_exa:%d:%d" % (sid, n)) for n in range(len(it["options"]))],
-            [("🚫 Прервать", "lrn:%d" % sid)]]
+            [("🚫 Прервать", "lrn_exdrop:%d" % sid)]]
     return "\n".join(body), rows
 
 
@@ -3651,7 +3720,8 @@ def screen_ex_result(sid, st, chosen):
     else:
         body.append("")
         body.append("Счёт: {} из {}".format(score, st["i"] + 1))
-        rows = [[("Дальше ▶️", "lrn_exn:%d" % sid)], [("🚫 Прервать", "lrn:%d" % sid)]]
+        rows = [[("Дальше ▶️", "lrn_exn:%d" % sid)],
+                [("🚫 Прервать", "lrn_exdrop:%d" % sid)]]
     return "\n".join(body), rows
 
 
@@ -4126,6 +4196,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                "lrn_prog", "lrn_board", "lrn_promo", "lrn_nick", "lrn_renick",
                "lrn_next", "lrn_mat", "lrn_fb", "lrn_pay", "lrn_key", "lrn_file",
                "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo", "lrn_exa", "lrn_exn",
+               "lrn_exask", "lrn_exdrop",
                "lrn_words", "lrn_more", "w_del", "w_delok", "lrn_quiet", "lrn_stats",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
@@ -4180,6 +4251,32 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             toast(cq_id)
             t, r = screen_ex(sid, parts[2] if len(parts) > 2 else "choice")
             return edit(chat_id, message_id, t, r)
+        if cmd == "lrn_exask":
+            kind, mode = parts[2], (parts[3] if len(parts) > 3 else "text")
+            s_ = sget(sid)
+            if not s_["is_self"] and (s_["keys"] or 0) < 1:
+                return toast(cq_id, "Нужен ключик")
+            spec = next((x for x in EX_TYPES if x[0] == kind), None)
+            cost = "" if s_["is_self"] else "\n\nСтоит 1 🔑, у вас их {}.".format(
+                s_["keys"] or 0)
+            return edit(chat_id, message_id,
+                        "{}\n{}{}".format(spec[1] if spec else kind,
+                                          "Отвечать кнопками" if mode == "choice"
+                                          else "Писать ответы самому", cost),
+                        [[("▶️ Начать", "lrn_exgo:%d:%s:%s" % (sid, kind, mode))],
+                         [("🕓 Потратить позже", "lrn_ex:%d" % sid)]])
+
+        if cmd == "lrn_exdrop":
+            st = get_state(chat_id)["pending"] or {}
+            if (st.get("action") in ("exdo", "exq") and st.get("paid")
+                    and not st.get("answered") and not st.get("i")):
+                if not sget(sid)["is_self"]:
+                    run("UPDATE students SET keys=COALESCE(keys,0)+1 WHERE id=?", (sid,))
+                toast(cq_id, "Ключик вернулся")
+            set_state(chat_id, pending=None)
+            t, r = screen_ex(sid)
+            return edit(chat_id, message_id, t, r)
+
         if cmd == "lrn_exgo":
             kind = parts[2]
             mode = parts[3] if len(parts) > 3 else "text"
@@ -4196,15 +4293,15 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                 run("UPDATE students SET keys=MAX(COALESCE(keys,0)-1,0) WHERE id=?", (sid,))
             if mode == "choice":
                 st = {"action": "exq", "sid": sid, "kind": kind, "title": data["title"],
-                      "items": data["items"], "i": 0, "score": 0}
+                      "items": data["items"], "i": 0, "score": 0, "paid": 1}
                 set_state(chat_id, student_id=sid, pending=st)
                 t, r = screen_ex_q(sid, st)
                 return edit(chat_id, message_id, t, r)
             set_state(chat_id, student_id=sid,
                       pending={"action": "exdo", "sid": sid, "kind": kind,
-                               "items": data["items"]})
+                               "items": data["items"], "paid": 1})
             return edit(chat_id, message_id, ex_text(data),
-                        [[("🚫 Отменить", "lrn:%d" % sid)]])
+                        [[("🚫 Отменить и вернуть ключик", "lrn_exdrop:%d" % sid)]])
 
         if cmd in ("lrn_exa", "lrn_exn"):
             st = get_state(chat_id)["pending"] or {}
@@ -4387,7 +4484,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             toast(cq_id)
             w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
             t, r = screen_card(sid, w, show=True)
-            return edit(chat_id, message_id, t, r)
+            try:
+                delete_message(chat_id, message_id)
+            except Exception:
+                pass
+            return send(chat_id, t, r)
         if cmd == "w_del":
             toast(cq_id)
             w = q("SELECT * FROM words WHERE id=?", (int(parts[2]),), one=True)
@@ -5058,6 +5159,22 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "bka_book":
         t, r = screen_audio_book(parts[1])
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "bka_wipe":
+        n = q("SELECT COUNT(*) c FROM audio WHERE book=?", (parts[1],), one=True)["c"]
+        return edit(chat_id, message_id,
+                    "🧨 Удалить все аудио учебника «{}»? Записей: <b>{}</b>.\n\n"
+                    "Сами файлы останутся в Telegram — пропадут только привязки, "
+                    "задания и ключи к трекам.".format(
+                        esc(BOOKS.get(parts[1], {}).get("title", parts[1])), n),
+                    [[("🧨 Да, удалить всё", "bka_wipeok:%s" % parts[1])],
+                     [("⬅️ Нет, вернуться", "bks_open:%s" % parts[1])]])
+
+    if cmd == "bka_wipeok":
+        run("DELETE FROM audio WHERE book=?", (parts[1],))
+        toast(cq_id, "Удалено")
+        t, r = screen_audio_book(parts[1])
+        return edit(chat_id, message_id, "🧨 Аудио учебника очищено.\n\n" + t, r)
 
     if cmd == "bka_spread":
         t, r = screen_audio_spread(parts[1], int(parts[2]), int(parts[3]))
@@ -6242,6 +6359,27 @@ def handle_command(chat_id, user_id, text):
         return send(chat_id, text_ai_usage(),
                     [[("🔌 Проверить связь", "aitest")], [("⬅️ К ученикам", "menu")]])
 
+    if cmd in ("filetest", "файлтест"):
+        lines = ["🧪 <b>Проверка доставки</b>", ""]
+        res = send_document(chat_id, "test.md", "# Тест\n\nЕсли вы видите этот файл, "
+                                                "документы доходят.\n", "тестовый файл")
+        if (res or {}).get("ok"):
+            lines.append("📄 Файл .md — <b>дошёл</b>")
+        else:
+            lines.append("📄 Файл .md — <b>отказ</b>: <code>{}</code>".format(
+                esc(str((res or {}).get("description") or "нет ответа")[:150])))
+        tok = tph_token()
+        if not tok:
+            lines.append("🌐 telegra.ph — <b>нет доступа</b>: <code>{}</code>\n"
+                         "Скорее всего, сайт закрыт с хостинга.".format(
+                             esc(meta_get("tph_error", "—"))))
+        else:
+            url = tph_page("Проверка связи", "Если страница открылась, публикация работает.")
+            lines.append("🌐 telegra.ph — {}".format(
+                "<b>работает</b>\n" + url if url else "<b>страница не создалась</b>"))
+        lines += ["", "<i>Подробности ошибок — в логах бота на хостинге.</i>"]
+        return send(chat_id, "\n".join(lines))
+
     if cmd in ("aitest", "тест"):
         send_temp(chat_id, "🔌 Проверяю…")
         return send(chat_id, ai_selftest())
@@ -6887,6 +7025,7 @@ def main():
         {"command": "notes", "description": "Напоминания"},
         {"command": "books", "description": "Учебники"},
         {"command": "ai", "description": "Расход токенов ИИ"},
+        {"command": "filetest", "description": "Проверить отправку файлов"},
         {"command": "level", "description": "Мой уровень для ИИ-заданий"},
         {"command": "week", "description": "Ближайшая неделя"},
         {"command": "schedule", "description": "Моё расписание"},
