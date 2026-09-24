@@ -18,6 +18,7 @@ Telegram-бот для репетитора: ученики, оплаты, за�
 Зависимостей нет, только стандартная библиотека Python 3.8+.
 """
 
+import base64
 import csv
 import html
 import io
@@ -2038,10 +2039,23 @@ def ai_base():
     return url.rstrip("/")
 
 
-def ai_call(prompt, max_tokens, fmt, url, model, timeout=90):
-    """Один запрос. Возвращает (текст, usage, ошибка)."""
+def ai_call(prompt, max_tokens, fmt, url, model, timeout=90, image=None):
+    """Один запрос. image — необязательная пара (байты, mime) для картинки.
+    Возвращает (текст, usage, ошибка)."""
+    if image:
+        b64 = base64.b64encode(image[0]).decode("ascii")
+        if fmt == "anthropic":
+            content = [{"type": "image",
+                       "source": {"type": "base64", "media_type": image[1], "data": b64}},
+                      {"type": "text", "text": prompt}]
+        else:
+            content = [{"type": "text", "text": prompt},
+                      {"type": "image_url",
+                       "image_url": {"url": "data:{};base64,{}".format(image[1], b64)}}]
+    else:
+        content = prompt
     payload = {"model": model, "max_tokens": max_tokens,
-               "messages": [{"role": "user", "content": prompt}]}
+               "messages": [{"role": "user", "content": content}]}
     if fmt == "anthropic":
         headers = {"x-api-key": AI_KEY, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
@@ -2119,18 +2133,19 @@ def ai_probe():
             "<code>AI_MODEL</code>.".format("\n".join(report)))
 
 
-def ai_complete(prompt, max_tokens=900, kind="misc", sid=None, timeout=None):
-    """Запрос к ИИ. Возвращает текст или None, если ключа нет или сервис недоступен."""
+def ai_complete(prompt, max_tokens=900, kind="misc", sid=None, timeout=None, image=None):
+    """Запрос к ИИ. image — необязательная пара (байты, mime) для распознавания фото.
+    Возвращает текст или None, если ключа нет или сервис недоступен."""
     ok, why = ai_allowed()
     if not ok:
         ai_note(kind, why)
         return None
     fmt, url, model = ai_conf()
     tmo = timeout or (240 if max_tokens > 2000 else 120)
-    out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo)
+    out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo, image=image)
     if not out and "timed out" in err.lower():
         print("AI timeout, повтор")
-        out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo)
+        out, u, err = ai_call(prompt, max_tokens, fmt, url, model, timeout=tmo, image=image)
     if u:
         ai_log(kind, sid, u.get("input_tokens", u.get("prompt_tokens", 0)),
                u.get("output_tokens", u.get("completion_tokens", 0)))
@@ -2305,10 +2320,8 @@ def ai_format_raw(sid, limit=15, items=None):
     return done, "" if done else "ИИ вернул пустой список. Подробности: /ai"
 
 
-def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
-    """Просит ИИ вернуть JSON и разбирает его. None, если не вышло."""
-    raw = ai_complete(prompt + "\n\nОтветь ТОЛЬКО валидным JSON, без пояснений "
-                               "и без ```.", max_tokens, kind, sid)
+def parse_json_text(raw, kind="misc"):
+    """Достаёт JSON из ответа модели, даже если он обёрнут пояснениями или ```."""
     if not raw:
         return None
     head = raw.strip()[:200]
@@ -2328,6 +2341,20 @@ def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
                 continue
     ai_note(kind, "ответ не разобрался как JSON. Начало ответа: " + head)
     return None
+
+
+def ai_json(prompt, max_tokens=1200, kind="misc", sid=None):
+    """Просит ИИ вернуть JSON и разбирает его. None, если не вышло."""
+    raw = ai_complete(prompt + "\n\nОтветь ТОЛЬКО валидным JSON, без пояснений "
+                               "и без ```.", max_tokens, kind, sid)
+    return parse_json_text(raw, kind)
+
+
+def ai_vision_json(image_bytes, mime, prompt, max_tokens=800, kind="vision", sid=None):
+    """Показывает картинку ИИ и просит JSON. None, если ключа нет или не вышло."""
+    raw = ai_complete(prompt + "\n\nОтветь ТОЛЬКО валидным JSON, без пояснений и без ```.",
+                      max_tokens, kind, sid, image=(image_bytes, mime))
+    return parse_json_text(raw, kind)
 
 
 def text_warmup(sid):
@@ -3570,7 +3597,7 @@ def screen_fin_day(d=None):
     btns = []
     for r_ in rows_:
         lines.append("{} {} — {} · <i>{}</i>".format(
-            "➕" if r_["kind"] == "income" else "-", money(r_["amount"]),
+            "➕" if r_["kind"] == "income" else "➖", money(r_["amount"]),
             esc(r_["title"]), r_["category"]))
         btns.append([("{} {}".format(money(r_["amount"]), r_["title"][:16]),
                       "fin_item:%d" % r_["id"])])
@@ -3583,7 +3610,7 @@ def screen_fin_item(tid):
         return "Запись не найдена.", [[("⬅️ Назад", "fin_day")]]
     text = "{} <b>{}</b> — {}\nКатегория: <b>{}</b>\n\nМожно поменять категорию — " \
            "запомню её и для следующих трат в этом месте.".format(
-               "➕" if r_["kind"] == "income" else "-", esc(r_["title"]),
+               "➕" if r_["kind"] == "income" else "➖", esc(r_["title"]),
                money(r_["amount"]), r_["category"])
     cats, row = [], []
     for c in FIN_CATS:
@@ -5910,7 +5937,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         for kind, amount, title, cat, dt in added:
             when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
             body.append("{} {} — {} · <i>{}</i>{}".format(
-                "➕" if kind == "income" else "-", money(amount), esc(title), cat, when))
+                "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
         send(chat_id, "\n".join(body))
         t, r = screen_money()
         return send(chat_id, t, r)
@@ -7000,12 +7027,148 @@ def parse_anki_card(front, back):
             "ipa": "", "definition": "", "syn": "", "ant": "", "coll": "", "example": ""}
 
 
+PHOTO_DATE_WORDS = {"сегодня": 0, "today": 0, "вчера": 1, "yesterday": 1,
+                    "позавчера": 2}
+
+
+def photo_date(token):
+    """Слово-дата от ИИ («today», «monday», «22.09») → date. None → сегодня."""
+    if not token:
+        return today()
+    t = str(token).strip().lower()
+    if t in PHOTO_DATE_WORDS:
+        return today() - timedelta(days=PHOTO_DATE_WORDS[t])
+    if t in WD_NAMES:
+        return today() - timedelta(days=(datetime.now().weekday() - WD_NAMES[t]) % 7)
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})$", t)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    m = re.match(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?$", t)
+    if m:
+        y = int(m.group(3) or today().year)
+        y = y + 2000 if y < 100 else y
+        try:
+            return date(y, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
+    return today()
+
+
+def fin_add_items(items):
+    """items: список (kind, amount, title, date_token) — как fin_add, но без разбора текста."""
+    clean = [(k, float(a), str(t)[:60], photo_date(d)) for k, a, t, d in items
+             if a and str(t).strip()]
+    if not clean:
+        return []
+    cats = fin_category([t for k, a, t, d in clean if k == "expense"])
+    added = []
+    for kind, amount, title, dt in clean:
+        cat = cats.get(title, "Прочее") if kind == "expense" else "Доход"
+        run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
+            "VALUES (?,?,?,?,?,?)",
+            (dt.isoformat(), kind, amount, title, cat,
+             datetime.now().isoformat(timespec="seconds")))
+        added.append((kind, amount, title, cat, dt))
+    return added
+
+
+def photo_biggest(msg_photo):
+    """Самая крупная версия фото из массива photo."""
+    return max(msg_photo, key=lambda p: p.get("file_size", 0) or p.get("width", 0))
+
+
+VISION_PROMPT = (
+    "Ты смотришь на скриншот с телефона преподавателя. Определи, что на картинке, "
+    "и верни ровно один из трёх видов ответа.\n\n"
+    "1) Если это уведомление или история операций банка (СМС о списании/поступлении, "
+    "экран истории платежей, чек) — верни:\n"
+    '{"kind":"money","items":[{"amount":73,"title":"короткое название магазина или '
+    'категории по-русски","type":"expense","date":"today"}]}\n'
+    "type — «expense» для списания/оплаты/покупки, «income» для поступления/перевода на "
+    "счёт. date — одно из: today, yesterday, monday..sunday (если дан день недели или "
+    "«Сегодня/Вчера»), либо dd.mm, либо null если не видно. Если это лента истории с "
+    "несколькими операциями за разные дни — верни их все с их датами. Название бери из "
+    "того, что видно (магазин, категория), коротко, без лишних слов.\n\n"
+    "2) Если это выделенное слово или фраза для словаря — карточка приложения, всплывающий "
+    "перевод, подсвеченный текст с определением или переводом (например, из книги, "
+    "переводчика, словаря) — верни:\n"
+    '{"kind":"word","term":"слово или фраза как есть","translation":"перевод на русский, '
+    'если виден","definition":"определение по-английски, если видно","example":"пример из '
+    'текста, если виден"}\n\n'
+    "3) Если это ни то ни другое — верни {\"kind\":\"unknown\"}.\n\n"
+    "Верни только JSON, без пояснений."
+)
+
+
 def import_target(chat_id):
     """Куда класть импортируемые слова: открытая карточка ученика или свой словарь."""
     sid = (get_state(chat_id) or {}).get("student_id")
     if sid and student(sid) and not student(sid)["archived"]:
         return student(sid)
     return self_student(chat_id)
+
+
+def handle_screenshot(chat_id, photo_sizes):
+    """Фото без подписи-даты: пробуем распознать как трату или как слово."""
+    ok, why = ai_allowed()
+    if not ok:
+        return send(chat_id, "📷 Фото получила, но не смогла разобрать: {}\n\n"
+                             "Можно добавить подписью время («завтра в 10») — сохраню как "
+                             "напоминание, или откройте карточку ученика и пришлите фото "
+                             "как материал.".format(esc(why)))
+    fid = photo_biggest(photo_sizes).get("file_id")
+    try:
+        img = download_file(fid)
+    except Exception as e:
+        return send(chat_id, "⚠️ Не скачала фото: <code>{}</code>".format(esc(str(e)[:120])))
+    if not img:
+        return send(chat_id, "⚠️ Telegram не отдал фото, попробуйте ещё раз.")
+    send_temp(chat_id, "🔎 Смотрю, что на фото…")
+    data = ai_vision_json(img, "image/jpeg", VISION_PROMPT, max_tokens=900, kind="vision")
+    if not isinstance(data, dict) or data.get("kind") not in ("money", "word"):
+        return send(chat_id, "🤷 Не разобрала, трата это или слово. Можно вписать вручную — "
+                             "текстом, как обычно.")
+
+    if data["kind"] == "money":
+        items = data.get("items") or []
+        parsed = [(str(it.get("type") or "expense").lower(), it.get("amount"),
+                  it.get("title") or "", it.get("date")) for it in items
+                 if isinstance(it, dict)]
+        parsed = [(k if k == "income" else "expense", a, t, d) for k, a, t, d in parsed]
+        added = fin_add_items(parsed)
+        if not added:
+            return send(chat_id, "На фото не нашла ни одной операции с суммой.")
+        body = ["💸 <b>Со скриншота записала</b>", ""]
+        for kind, amount, title, cat, dt in added:
+            when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
+            body.append("{} {} — {} · <i>{}</i>{}".format(
+                "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
+        return send(chat_id, "\n".join(body), [[("💰 Деньги", "money")]])
+
+    term = (data.get("term") or "").strip()
+    if not term:
+        return send(chat_id, "На фото не нашла слово — не за что зацепиться.")
+    target = import_target(chat_id)
+    translation = (data.get("translation") or "")[:120]
+    definition = (data.get("definition") or "")[:300]
+    example = (data.get("example") or "")[:300]
+    run("INSERT INTO words (student_id, term, translation, definition, example, added_by, "
+        "due, created, raw) VALUES (?,?,?,?,?,?,?,?,0)",
+        (target["id"], term[:80], translation, definition, example, "педагог",
+         today().isoformat(), today().isoformat()))
+    lines = ["📚 <b>Со скриншота добавила в «{}»</b>".format(esc(target["name"])), "",
+             "<b>{}</b>".format(esc(term))]
+    if translation:
+        lines.append("🇷🇺 {}".format(esc(translation)))
+    if definition:
+        lines.append(esc(definition))
+    if not translation and not definition:
+        lines.append("<i>Перевода на фото не было — слово лежит без него, добавьте "
+                     "вручную или оформите через ИИ в словаре.</i>")
+    return send(chat_id, "\n".join(lines), [[("🔁 Повторить сейчас", "lrn_go:%d" % target["id"])]])
 
 
 def hw_attach_forward(chat_id, sid, kind, file_id, caption=""):
@@ -7160,11 +7323,15 @@ def handle(update):
             if pend.get("action") == "hw_attach":
                 if msg.get("photo"):
                     return hw_attach_forward(chat_id, pend["sid"], "photo",
-                                             msg["photo"][-1]["file_id"],
+                                             photo_biggest(msg["photo"])["file_id"],
                                              msg.get("caption") or "")
                 return hw_attach_forward(chat_id, pend["sid"], "document",
                                          msg["document"]["file_id"],
                                          msg.get("caption") or "")
+            if pend.get("action") == "matfile" and msg.get("photo"):
+                photo = photo_biggest(msg["photo"])
+                return handle_document(chat_id, {"file_id": photo["file_id"],
+                                                 "file_name": "photo.jpg"})
             cap = msg.get("caption") or ""
             when = parse_when(cap) if cap else None
             if when:
@@ -7173,14 +7340,13 @@ def handle(update):
                     note_save(chat_id, cap, when, doc.get("file_id"), "doc",
                               doc.get("file_name"))
                 else:
-                    note_save(chat_id, cap, when, msg["photo"][-1].get("file_id"), "photo",
-                              "фото")
+                    note_save(chat_id, cap, when, photo_biggest(msg["photo"]).get("file_id"),
+                              "photo", "фото")
                 return send(chat_id, "✅ Напомню {} и пришлю файл.".format(
                     fmt_when(when.isoformat(timespec="minutes"))),
                     [[("⏰ Все напоминания", "notes")]])
             if msg.get("photo"):
-                return send(chat_id, "Чтобы я напомнила с этим фото, добавьте подпись "
-                                     "со временем: «завтра в 10».")
+                return handle_screenshot(chat_id, msg["photo"])
             return handle_document(chat_id, msg["document"])
         text = msg.get("text") or ""
         if not text.strip():
@@ -7212,7 +7378,7 @@ def handle(update):
                 for kind, amount, title, cat, dt in added:
                     when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
                     body.append("{} {} — {} · <i>{}</i>{}".format(
-                        "➕" if kind == "income" else "-", money(amount), esc(title), cat, when))
+                        "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
                 inc, exp, _ = fin_month()
                 body += ["", "С начала месяца: +{} / −{}".format(money(inc), money(exp))]
                 return send(chat_id, "\n".join(body),
