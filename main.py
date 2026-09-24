@@ -3581,7 +3581,7 @@ def screen_money():
                 money(max(paid - sum(c["balance"] or 0 for c in cs), 0))))
     else:
         lines += ["", "<i>Кредиты не заведены — добавьте, и появится прогноз.</i>"]
-    rows = [[("➕ Трата", "fin_new:e"), ("➕ Поступление", "fin_new:i")],
+    rows = [[("➖ Трата", "fin_new:e"), ("➕ Поступление", "fin_new:i")],
             [("🧾 Сегодня", "fin_day"), ("📊 За месяц", "fin_month")],
             [("💳 Кредиты", "cr_list"), ("📁 Выгрузка", "fin_csv")],
             [("⬅️ К ученикам", "menu")]]
@@ -3601,13 +3601,17 @@ def screen_fin_day(d=None):
             esc(r_["title"]), r_["category"]))
         btns.append([("{} {}".format(money(r_["amount"]), r_["title"][:16]),
                       "fin_item:%d" % r_["id"])])
-    return "\n".join(lines), btns + [[("⬅️ Назад", "money")]]
+    nav = [("◀️", "fin_day:%s" % (d - timedelta(days=1)).isoformat())]
+    if d < today():
+        nav.append(("▶️", "fin_day:%s" % (d + timedelta(days=1)).isoformat()))
+    return "\n".join(lines), btns + [nav, [("⬅️ Назад", "money")]]
 
 
 def screen_fin_item(tid):
     r_ = q("SELECT * FROM fin_tx WHERE id=?", (tid,), one=True)
     if not r_:
         return "Запись не найдена.", [[("⬅️ Назад", "fin_day")]]
+    back = "fin_day:%s" % r_["on_date"]
     text = "{} <b>{}</b> — {}\nКатегория: <b>{}</b>\n\nМожно поменять категорию — " \
            "запомню её и для следующих трат в этом месте.".format(
                "➕" if r_["kind"] == "income" else "➖", esc(r_["title"]),
@@ -3621,7 +3625,7 @@ def screen_fin_item(tid):
     if row:
         cats.append(row)
     return text, cats + [[("🗑 Удалить запись", "fin_del:%d" % tid)],
-                         [("⬅️ Назад", "fin_day")]]
+                         [("⬅️ Назад", back)]]
 
 
 def screen_credits():
@@ -4930,7 +4934,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         return edit(chat_id, message_id, t, r)
 
     if cmd == "fin_day":
-        t, r = screen_fin_day()
+        try:
+            fd = date.fromisoformat(parts[1]) if len(parts) > 1 else today()
+        except ValueError:
+            fd = today()
+        t, r = screen_fin_day(fd)
         return edit(chat_id, message_id, t, r)
 
     if cmd == "fin_item":
@@ -4945,14 +4953,44 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
             run("INSERT OR REPLACE INTO fin_cat (merchant, category) VALUES (?,?)",
                 (r_["title"].strip().lower(), cat))
         toast(cq_id, "Категория: " + cat)
-        t, r = screen_fin_day()
+        t, r = screen_fin_day(date.fromisoformat(r_["on_date"]) if r_ else today())
         return edit(chat_id, message_id, t, r)
 
     if cmd == "fin_del":
+        r_ = q("SELECT on_date FROM fin_tx WHERE id=?", (int(parts[1]),), one=True)
         run("DELETE FROM fin_tx WHERE id=?", (int(parts[1]),))
         toast(cq_id, "Удалено")
-        t, r = screen_fin_day()
+        t, r = screen_fin_day(date.fromisoformat(r_["on_date"]) if r_ else today())
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "findupe":
+        pend = get_state(chat_id)["pending"] or {}
+        if pend.get("action") != "fin_confirm":
+            return toast(cq_id, "Уже неактуально")
+        items = pend.get("items") or []
+        choice = parts[1] if len(parts) > 1 else "all"
+        set_state(chat_id, pending=None)
+        if choice == "none":
+            return edit(chat_id, message_id, "🚫 Не стала добавлять.", [])
+        if choice == "one":
+            seen, keep = set(), []
+            for it in items:
+                gk = fin_group_key(*it[:3])
+                if gk in seen:
+                    continue
+                seen.add(gk)
+                keep.append(it)
+            items = keep
+        added = fin_add_items(items)
+        if not added:
+            return edit(chat_id, message_id, "Не осталось операций для записи.", [])
+        body = ["💸 <b>Записала</b>", ""]
+        for kind, amount, title, cat, dt in added:
+            when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
+            body.append("{} {} — {} · <i>{}</i>{}".format(
+                "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
+        body += [""] + fin_day_lines(added)
+        return edit(chat_id, message_id, "\n".join(body), [[("💰 Деньги", "money")]])
 
     if cmd == "fin_new":
         kind = "i" if parts[1] == "i" else "e"
@@ -5938,6 +5976,7 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
             body.append("{} {} — {} · <i>{}</i>{}".format(
                 "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
+        body += [""] + fin_day_lines(added)
         send(chat_id, "\n".join(body))
         t, r = screen_money()
         return send(chat_id, t, r)
@@ -7057,6 +7096,37 @@ def photo_date(token):
     return today()
 
 
+def fin_group_key(kind, amount, title):
+    return (kind, round(float(amount or 0), 2),
+            re.sub(r"\s+", " ", (title or "").strip().lower()))
+
+
+def find_dupes(parsed):
+    """Группы (тип, сумма, название), встретившиеся в пачке больше одного раза."""
+    cnt = {}
+    for k, a, t, d in parsed:
+        gk = fin_group_key(k, a, t)
+        cnt[gk] = cnt.get(gk, 0) + 1
+    return {gk: n for gk, n in cnt.items() if n > 1}
+
+
+def fin_day_total(d):
+    r = q("SELECT COALESCE(SUM(CASE WHEN kind='income' THEN amount ELSE 0 END),0) i, "
+          "COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) e "
+          "FROM fin_tx WHERE on_date=?", (d.isoformat(),), one=True)
+    return r["i"], r["e"]
+
+
+def fin_day_lines(added):
+    """Строки с итогом по каждому дню, затронутому добавлением."""
+    days = sorted({dt for *_, dt in added})
+    out = []
+    for d in days:
+        inc, exp = fin_day_total(d)
+        out.append("📅 {}: −{} / +{}".format(fmt_date(d, True), money(exp), money(inc)))
+    return out
+
+
 def fin_add_items(items):
     """items: список (kind, amount, title, date_token) — как fin_add, но без разбора текста."""
     clean = [(k, float(a), str(t)[:60], photo_date(d)) for k, a, t, d in items
@@ -7136,8 +7206,24 @@ def handle_screenshot(chat_id, photo_sizes):
         items = data.get("items") or []
         parsed = [(str(it.get("type") or "expense").lower(), it.get("amount"),
                   it.get("title") or "", it.get("date")) for it in items
-                 if isinstance(it, dict)]
+                 if isinstance(it, dict) and it.get("amount")]
         parsed = [(k if k == "income" else "expense", a, t, d) for k, a, t, d in parsed]
+        if not parsed:
+            return send(chat_id, "На фото не нашла ни одной операции с суммой.")
+        dupes = find_dupes(parsed)
+        if dupes:
+            set_state(chat_id, pending={"action": "fin_confirm", "items": parsed})
+            lines = ["🤔 <b>Похоже на повтор</b>", "",
+                     "На фото несколько одинаковых записей подряд:"]
+            for gk, n in dupes.items():
+                orig = next((t for k, a, t, d in parsed if fin_group_key(k, a, t) == gk), gk[2])
+                lines.append("• {} {} — {} × {}".format(
+                    "➕" if gk[0] == "income" else "➖", money(gk[1]), esc(orig), n))
+            lines += ["", "Это правда разные операции, или задвоилось при чтении скрина?"]
+            return send(chat_id, "\n".join(lines),
+                        [[("✅ Это разные — добавить все", "findupe:all")],
+                         [("✂️ Оставить по одной", "findupe:one")],
+                         [("🚫 Не добавлять", "findupe:none")]])
         added = fin_add_items(parsed)
         if not added:
             return send(chat_id, "На фото не нашла ни одной операции с суммой.")
@@ -7146,6 +7232,7 @@ def handle_screenshot(chat_id, photo_sizes):
             when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
             body.append("{} {} — {} · <i>{}</i>{}".format(
                 "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
+        body += [""] + fin_day_lines(added)
         return send(chat_id, "\n".join(body), [[("💰 Деньги", "money")]])
 
     term = (data.get("term") or "").strip()
@@ -7379,8 +7466,7 @@ def handle(update):
                     when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
                     body.append("{} {} — {} · <i>{}</i>{}".format(
                         "➕" if kind == "income" else "➖", money(amount), esc(title), cat, when))
-                inc, exp, _ = fin_month()
-                body += ["", "С начала месяца: +{} / −{}".format(money(inc), money(exp))]
+                body += [""] + fin_day_lines(added)
                 return send(chat_id, "\n".join(body),
                             [[("💰 Деньги", "money")]])
         if is_owner(user_id) and looks_like_wordlist(text):
