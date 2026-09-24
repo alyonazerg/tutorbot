@@ -1502,6 +1502,52 @@ def screen_lesson_audio(bid, un, ln):
     return "\n".join(lines), rows
 
 
+def parse_hw_header(text):
+    """Первая строка вида «Friday 19-00» или «19.09 18:00» → (дата, время, остальной текст)."""
+    lines = text.split("\n", 1)
+    first = lines[0].strip()
+    rest = lines[1] if len(lines) > 1 else ""
+    if not first or len(first) > 40:
+        return None, None, text
+    now = datetime.now()
+    low, left = first.lower(), first
+    day = None
+    for name, wd in WD_NAMES.items():
+        mm = re.search(r"(?<![a-zа-яё])" + re.escape(name) + r"(?![a-zа-яё])", low)
+        if mm:
+            day = now.date() + timedelta(days=(wd - now.weekday()) % 7)
+            left = left[:mm.start()] + left[mm.end():]
+            low = low[:mm.start()] + low[mm.end():]
+            break
+    if day is None:
+        dm = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", first)
+        if dm:
+            y = int(dm.group(3) or now.year)
+            y = y + 2000 if y < 100 else y
+            try:
+                day = date(y, int(dm.group(2)), int(dm.group(1)))
+                left = left.replace(dm.group(0), "")
+            except ValueError:
+                day = None
+    if day is None and re.search(r"\bзавтра\b", low):
+        day = now.date() + timedelta(days=1)
+        left = re.sub(r"(?i)завтра", "", left)
+    if day is None and re.search(r"\b(сегодня|today)\b", low):
+        day = now.date()
+        left = re.sub(r"(?i)сегодня|today", "", left)
+    hour = minute = None
+    hm = re.search(r"\b(\d{1,2})[:.\-](\d{2})\b", left)
+    if hm and int(hm.group(1)) <= 23 and int(hm.group(2)) <= 59:
+        hour, minute = int(hm.group(1)), int(hm.group(2))
+        left = left[:hm.start()] + left[hm.end():]
+    if day is None and hour is None:
+        return None, None, text
+    if re.sub(r"[\s,.\-:]+", "", left):
+        return None, None, text
+    time_str = "{:02d}:{:02d}".format(hour, minute) if hour is not None else None
+    return day, time_str, rest.strip()
+
+
 def draft_get(sid, bid, code):
     return q("SELECT * FROM hw_draft WHERE student_id=? AND book=? AND code=?",
              (sid, bid, code), one=True)
@@ -3145,7 +3191,12 @@ def ai_book_material(sid, kind, force=False):
 WD_NAMES = {"понедельник": 0, "вторник": 1, "среда": 2, "среду": 2, "четверг": 3,
             "пятница": 4, "пятницу": 4, "суббота": 5, "субботу": 5,
             "воскресенье": 6, "пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4,
-            "сб": 5, "вс": 6}
+            "сб": 5, "вс": 6,
+            "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4,
+            "saturday": 5, "sunday": 6, "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+            "fri": 4, "sat": 5, "sun": 6}
+# длинные имена — раньше коротких, иначе "fri" срежет часть "friday"
+WD_NAMES = dict(sorted(WD_NAMES.items(), key=lambda kv: -len(kv[0])))
 
 
 def parse_when(text, base=None):
@@ -3309,9 +3360,37 @@ def money_parse(line):
     return ("income" if sign == "+" else "expense", amount, title[:60])
 
 
+def extract_money_date(line, now=None):
+    """Убирает из строки траты упоминание даты и возвращает (дата или None, остаток строки)."""
+    now = now or datetime.now()
+    low, left = line.lower(), line
+    for name, wd in WD_NAMES.items():
+        mm = re.search(r"(?<![a-zа-яё])" + re.escape(name) + r"(?![a-zа-яё])", low)
+        if mm:
+            back = (now.weekday() - wd) % 7
+            return now.date() - timedelta(days=back), (left[:mm.start()] + left[mm.end():]).strip()
+    if re.search(r"\bпозавчера\b", low):
+        return now.date() - timedelta(days=2), re.sub(r"(?i)позавчера", "", left).strip()
+    if re.search(r"\bвчера\b", low):
+        return now.date() - timedelta(days=1), re.sub(r"(?i)вчера", "", left).strip()
+    if re.search(r"\bсегодня\b", low):
+        return now.date(), re.sub(r"(?i)сегодня", "", left).strip()
+    dm = re.search(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)", line)
+    if dm:
+        y = int(dm.group(3) or now.year)
+        y = y + 2000 if y < 100 else y
+        try:
+            day = date(y, int(dm.group(2)), int(dm.group(1)))
+            return day, left.replace(dm.group(0), "").strip()
+        except ValueError:
+            pass
+    return None, line
+
+
 def looks_like_money(text):
     lines = [l for l in text.strip().splitlines() if l.strip()]
-    return bool(lines) and len(lines) <= 20 and all(money_parse(l) for l in lines)
+    return bool(lines) and len(lines) <= 20 and all(
+        money_parse(extract_money_date(l)[1]) for l in lines)
 
 
 def fin_category(titles):
@@ -3362,21 +3441,25 @@ def fin_income(amount, title, d=None, category="Занятия"):
 
 def fin_add(lines, d=None, force=None):
     """Записывает траты и поступления. Возвращает добавленные строки."""
-    items = [money_parse(l) for l in lines]
-    items = [i for i in items if i]
+    parsed = []
+    for l in lines:
+        dt, cleaned = extract_money_date(l)
+        item = money_parse(cleaned)
+        if item:
+            parsed.append((item, dt or d or today()))
     if force:
-        items = [(force, a, t) for k, a, t in items]
-    if not items:
+        parsed = [((force, a, t), dt) for (k, a, t), dt in parsed]
+    if not parsed:
         return []
-    cats = fin_category([t for k, a, t in items if k == "expense"])
+    cats = fin_category([t for (k, a, t), dt in parsed if k == "expense"])
     added = []
-    for kind, amount, title in items:
+    for (kind, amount, title), dt in parsed:
         cat = cats.get(title, "Прочее") if kind == "expense" else "Доход"
         run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
             "VALUES (?,?,?,?,?,?)",
-            ((d or today()).isoformat(), kind, amount, title, cat,
+            (dt.isoformat(), kind, amount, title, cat,
              datetime.now().isoformat(timespec="seconds")))
-        added.append((kind, amount, title, cat))
+        added.append((kind, amount, title, cat, dt))
     return added
 
 
@@ -3487,7 +3570,7 @@ def screen_fin_day(d=None):
     btns = []
     for r_ in rows_:
         lines.append("{} {} — {} · <i>{}</i>".format(
-            "➕" if r_["kind"] == "income" else "➖", money(r_["amount"]),
+            "➕" if r_["kind"] == "income" else "-", money(r_["amount"]),
             esc(r_["title"]), r_["category"]))
         btns.append([("{} {}".format(money(r_["amount"]), r_["title"][:16]),
                       "fin_item:%d" % r_["id"])])
@@ -3500,7 +3583,7 @@ def screen_fin_item(tid):
         return "Запись не найдена.", [[("⬅️ Назад", "fin_day")]]
     text = "{} <b>{}</b> — {}\nКатегория: <b>{}</b>\n\nМожно поменять категорию — " \
            "запомню её и для следующих трат в этом месте.".format(
-               "➕" if r_["kind"] == "income" else "➖", esc(r_["title"]),
+               "➕" if r_["kind"] == "income" else "-", esc(r_["title"]),
                money(r_["amount"]), r_["category"])
     cats, row = [], []
     for c in FIN_CATS:
@@ -3994,6 +4077,20 @@ def spark(vals, width=8):
                    for v in vals)
 
 
+def calendar_heat(counts, per_row=7):
+    if not counts:
+        return ""
+    top = max(counts) or 1
+    def cell(v):
+        if v == 0:
+            return "⬜"
+        r = v / top
+        return "🟨" if r < 0.34 else ("🟩" if r < 0.67 else "🟦")
+    rows_ = ["".join(cell(v) for v in counts[i:i + per_row])
+             for i in range(0, len(counts), per_row)]
+    return "\n".join(rows_)
+
+
 def screen_deck_stats(sid):
     s = sget(sid)
     st = deck_stats(sid)
@@ -4023,6 +4120,21 @@ def screen_deck_stats(sid):
              "{} ".format(spark(fc)),
              "Сегодня: <b>{}</b> · завтра: <b>{}</b> · за неделю: <b>{}</b>".format(
                  fc[0], fc[1], sum(fc[:7]))]
+    hist35 = review_history(sid, 35)
+    counts35 = [h[0] for h in hist35]
+    if any(counts35):
+        lines += ["", "<b>Календарь — 5 недель</b>",
+                  calendar_heat(counts35),
+                  "<i>{} — сегодня</i>".format(fmt_date(today() - timedelta(days=34), True))]
+    grades = q("SELECT grade, COUNT(*) c FROM reviews WHERE student_id=? GROUP BY grade",
+              (sid,))
+    gd = {g["grade"]: g["c"] for g in grades}
+    gtot = sum(gd.values())
+    if gtot:
+        lines += ["", "<b>Кнопки за всё время</b>",
+                  "❌ {}% · 😕 {}% · 🙂 {}% · 😎 {}%".format(
+                      round((gd.get(0, 0)) * 100 / gtot), round((gd.get(1, 0)) * 100 / gtot),
+                      round((gd.get(2, 0)) * 100 / gtot), round((gd.get(3, 0)) * 100 / gtot))]
     hard = hard_words(sid, days=30, limit=5)
     if hard:
         lines += ["", "<b>Труднее всего</b>"]
@@ -4819,10 +4931,12 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         kind = "i" if parts[1] == "i" else "e"
         set_state(chat_id, pending={"action": "fin_new", "kind": kind})
         return edit(chat_id, message_id,
-                    "➕ Пришлите {}, по одной в строке:\n\n<code>{}</code>".format(
+                    "➕ Пришлите {}, по одной в строке. Дату можно указать словом — "
+                    "«вчера», «пятница», «25.09» — иначе запишу сегодняшним числом:\n\n"
+                    "<code>{}</code>".format(
                         "поступления" if kind == "i" else "траты",
-                        "занятие Аня 2500\nвозврат 900" if kind == "i"
-                        else "пятёрочка 1200\nцппк 250"),
+                        "занятие Аня 2500\nвозврат 900 вчера" if kind == "i"
+                        else "пятёрочка 1200\nцппк 250 вчера"),
                     [[("⬅️ Назад", "money")]])
 
     if cmd == "cr_edit":
@@ -5019,6 +5133,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         toast(cq_id, "Добавила {} слов".format(len(words)))
         t, r = screen_hw_draft(sid)
         return edit(chat_id, message_id, t, r)
+
+    if cmd == "hwatt_done":
+        set_state(chat_id, pending=None)
+        toast(cq_id, "Готово")
+        return edit(chat_id, message_id, "✅ Закончила пересылку материалов.", [])
 
     if cmd == "hwd_wb":
         t, r = screen_hw_wb(sid)
@@ -5627,6 +5746,16 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         t, r = screen_students(chat_id)
         return send(chat_id, "⚠️ Такого ученика в базе нет — возможно, база очищалась.\n\n" + t, r)
 
+    if action == "hw_attach":
+        s_ = sget(sid)
+        if s_["tg_user_id"]:
+            send(s_["tg_user_id"], esc(text.strip()[:1000]))
+            send(chat_id, "📎 Переслала ученику текстом. Ещё файлы или текст — присылайте, "
+                         "или нажмите «Хватит».", [[("✅ Хватит", "hwatt_done:%d" % sid)]])
+        else:
+            send(chat_id, "Ученик не подключён к боту — переслать некуда.")
+        return
+
     if action == "exdo":
         items = pending.get("items") or []
         answers = [l.strip() for l in text.strip().split("\n") if l.strip()]
@@ -5778,9 +5907,10 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
             return send(chat_id, "Не разобрала. Нужна сумма и название: "
                                  "<code>пятёрочка 1200</code>")
         body = ["💸 <b>Записала</b>", ""]
-        for kind, amount, title, cat in added:
-            body.append("{} {} — {} · <i>{}</i>".format(
-                "➕" if kind == "income" else "➖", money(amount), esc(title), cat))
+        for kind, amount, title, cat, dt in added:
+            when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
+            body.append("{} {} — {} · <i>{}</i>{}".format(
+                "➕" if kind == "income" else "-", money(amount), esc(title), cat, when))
         send(chat_id, "\n".join(body))
         t, r = screen_money()
         return send(chat_id, t, r)
@@ -5992,20 +6122,35 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         return send(chat_id, t, r)
 
     if action == "hw":
-        due = next_lesson_date(sid)
+        day, time_str, body = parse_hw_header(text)
+        if day:
+            due = day
+            label = fmt_date(due) + (" " + time_str if time_str else "")
+        else:
+            due = next_lesson_date(sid)
+            body = text.strip()
+            label = fmt_date(due) if due else None
         run("UPDATE homework SET done=1 WHERE student_id=? AND done=0", (sid,))
-        run("INSERT INTO homework (student_id, text, due, created) VALUES (?,?,?,?)",
-            (sid, text.strip()[:2000], due.isoformat() if due else None, today().isoformat()))
+        hwid = run("INSERT INTO homework (student_id, text, due, created) VALUES (?,?,?,?)",
+                  (sid, body[:2000], due.isoformat() if due else None, today().isoformat()))
+        after_lid = pending.get("after") and pending.get("lid")
         set_state(chat_id, pending=None)
         sent = notify_student(sid, "📝 <b>Homework</b>{}\n\n{}".format(
-            " for " + fmt_date(due) if due else "", esc(text.strip()[:2000])))
+            " for " + label if label else "", esc(body[:2000])))
         flash(chat_id, "✅ Домашка сохранена{}.".format(
             " и отправлена ученику" if sent else " (ученик не подключён к боту)"))
-        if pending.get("after"):
-            t, r = screen_after(sid, pending["lid"])
+        if after_lid:
+            t, r = screen_after(sid, after_lid)
         else:
             t, r = screen_hw(sid)
-        return send(chat_id, t, r)
+        send(chat_id, t, r)
+        if sent:
+            set_state(chat_id, student_id=sid,
+                      pending={"action": "hw_attach", "sid": sid, "hwid": hwid})
+            send(chat_id, "📎 Можно прислать фото или файлы следующими сообщениями — "
+                         "перешлю их ученику сразу вслед за заданием.",
+                [[("✅ Хватит", "hwatt_done:%d" % sid)]])
+        return
 
     if action == "material":
         line = text.strip()
@@ -6801,10 +6946,114 @@ def restore_db(chat_id, data, filename=""):
                              esc(os.path.basename(DB_PATH) + ".old")))
 
 
+def strip_tags(t):
+    return html.unescape(re.sub(r"<[^>]+>", "", t or "")).strip()
+
+
+def anki_color(back, color):
+    m = re.search(r"color:\s*" + color + r"[^>]*>(.*?)</span>", back, re.I | re.S)
+    return strip_tags(m.group(1)) if m else ""
+
+
+def parse_anki_rows(content):
+    """Текст экспорта Anki (front\tback построчно, либо CSV) → список пар (front, back)."""
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    sample = [l for l in content.split("\n")[:5] if l.strip()]
+    rows = []
+    if sample and all("\t" in l for l in sample):
+        for line in content.split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                rows.append((parts[0], parts[1]))
+    else:
+        try:
+            for row in csv.reader(io.StringIO(content)):
+                if len(row) >= 2 and (row[0].strip() or row[1].strip()):
+                    rows.append((row[0], row[1]))
+        except csv.Error:
+            pass
+    return rows
+
+
+def parse_anki_card(front, back):
+    """Одна карточка экспорта → словарь полей words. Понимает и свой HTML-формат,
+    и простую пару «слово — перевод»."""
+    front_txt = strip_tags(front)
+    if "<b>" in back.lower() or "color:" in back.lower():
+        m = re.search(r"<b>(.*?)</b>", back, re.I | re.S)
+        term = strip_tags(m.group(1)) if m else front_txt[:80]
+        ipa = strip_tags(re.search(r"color:\s*gray[^>]*>(.*?)</span>", back, re.I | re.S)
+                         .group(1)).strip("/[] ") if re.search(
+                             r"color:\s*gray[^>]*>(.*?)</span>", back, re.I | re.S) else ""
+        syn = re.sub(r"(?i)^syn:\s*", "", anki_color(back, "green"))
+        ant = re.sub(r"(?i)^ant:\s*", "", anki_color(back, "red"))
+        coll = re.sub(r"(?i)^coll:\s*", "", anki_color(back, "orange"))
+        ex = re.sub(r"(?i)^ex:\s*", "", anki_color(back, "blue")).strip("\"“”")
+        m = re.search(r"ru:\s*(.*?)(?:</span>|</details>|$)", back, re.I | re.S)
+        translation = strip_tags(m.group(1)) if m else ""
+        return {"term": term[:80], "ipa": ipa[:60], "definition": front_txt[:300],
+                "syn": syn[:120], "ant": ant[:120], "coll": coll[:120],
+                "example": ex[:300], "translation": translation[:120]}
+    return {"term": front_txt[:80], "translation": strip_tags(back)[:120],
+            "ipa": "", "definition": "", "syn": "", "ant": "", "coll": "", "example": ""}
+
+
+def import_target(chat_id):
+    """Куда класть импортируемые слова: открытая карточка ученика или свой словарь."""
+    sid = (get_state(chat_id) or {}).get("student_id")
+    if sid and student(sid) and not student(sid)["archived"]:
+        return student(sid)
+    return self_student(chat_id)
+
+
+def hw_attach_forward(chat_id, sid, kind, file_id, caption=""):
+    """Пересылает файл ученику, пока преподаватель находится в режиме досылки материалов."""
+    s_ = sget(sid)
+    if not s_["tg_user_id"]:
+        send(chat_id, "Ученик не подключён к боту — файл не доставлен.",
+             [[("✅ Хватит", "hwatt_done:%d" % sid)]])
+        return
+    tg("sendPhoto" if kind == "photo" else "sendDocument", chat_id=s_["tg_user_id"],
+       **{kind: file_id}, caption=caption[:1000])
+    send(chat_id, "📎 Переслала ученику. Ещё — присылайте, или нажмите «Хватит».",
+         [[("✅ Хватит", "hwatt_done:%d" % sid)]])
+
+
 def handle_document(chat_id, doc):
     """Владелец прислал файл: принимаем .db только сразу после команды /restore."""
     name = doc.get("file_name") or "файл"
     pending = get_state(chat_id)["pending"] or {}
+
+    if pending.get("action") == "hw_attach":
+        return hw_attach_forward(chat_id, pending["sid"], "document", doc.get("file_id"))
+
+    if name.lower().endswith((".csv", ".txt")) and pending.get("action") not in (
+            "audio", "audio_book", "matfile", "restore"):
+        try:
+            data = download_file(doc.get("file_id")).decode("utf-8-sig", "replace")
+        except Exception as e:
+            return send(chat_id, "⚠️ Не скачала файл: <code>{}</code>".format(esc(str(e)[:120])))
+        rows = parse_anki_rows(data)
+        if not rows:
+            return send(chat_id, "Не нашла в файле пар «вопрос — ответ». Нужен файл "
+                                 "с двумя колонками на строку (табуляция или CSV).")
+        target = import_target(chat_id)
+        cards = [parse_anki_card(f, b) for f, b in rows[:300]]
+        cards = [c for c in cards if c["term"]]
+        for c in cards:
+            run("INSERT INTO words (student_id, term, translation, ipa, definition, syn, "
+                "ant, coll, example, added_by, due, created, raw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)",
+                (target["id"], c["term"], c["translation"], c["ipa"], c["definition"],
+                 c["syn"], c["ant"], c["coll"], c["example"], "педагог",
+                 today().isoformat(), today().isoformat()))
+        extra = "\n… и ещё {}".format(len(rows) - 300) if len(rows) > 300 else ""
+        return send(chat_id, "📥 Импортировано в словарь «{}»: <b>{}</b> карточек.{}\n\n"
+                             "{}".format(esc(target["name"]), len(cards), extra,
+                                        "\n".join("• {}".format(esc(c["term"]))
+                                                  for c in cards[:8])))
 
     if name.lower().endswith(".json") and pending.get("action") != "audio":
         try:
@@ -6907,6 +7156,15 @@ def handle(update):
         if msg.get("document") or msg.get("photo"):
             if not is_owner(user_id):
                 return
+            pend = get_state(chat_id)["pending"] or {}
+            if pend.get("action") == "hw_attach":
+                if msg.get("photo"):
+                    return hw_attach_forward(chat_id, pend["sid"], "photo",
+                                             msg["photo"][-1]["file_id"],
+                                             msg.get("caption") or "")
+                return hw_attach_forward(chat_id, pend["sid"], "document",
+                                         msg["document"]["file_id"],
+                                         msg.get("caption") or "")
             cap = msg.get("caption") or ""
             when = parse_when(cap) if cap else None
             if when:
@@ -6951,9 +7209,10 @@ def handle(update):
             added = fin_add([l for l in text.splitlines() if l.strip()])
             if added:
                 body = ["💸 <b>Записала</b>", ""]
-                for kind, amount, title, cat in added:
-                    body.append("{} {} — {} · <i>{}</i>".format(
-                        "➕" if kind == "income" else "➖", money(amount), esc(title), cat))
+                for kind, amount, title, cat, dt in added:
+                    when = "" if dt == today() else " · {}".format(fmt_date(dt, True))
+                    body.append("{} {} — {} · <i>{}</i>{}".format(
+                        "➕" if kind == "income" else "-", money(amount), esc(title), cat, when))
                 inc, exp, _ = fin_month()
                 body += ["", "С начала месяца: +{} / −{}".format(money(inc), money(exp))]
                 return send(chat_id, "\n".join(body),
