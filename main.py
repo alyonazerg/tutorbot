@@ -28,7 +28,9 @@ import random
 import re
 import sqlite3
 import string
+import struct
 import time
+import zlib
 import traceback
 import urllib.error
 import urllib.parse
@@ -194,8 +196,9 @@ def send_document(chat_id, filename, content, caption="", mime=None):
         return {}
 
 
-def send_bytes(chat_id, filename, data, caption="", mime="application/octet-stream"):
-    """Отправка бинарного файла (например, базы) как документа."""
+def send_bytes(chat_id, filename, data, caption="", mime="application/octet-stream",
+              method="sendDocument", field="document"):
+    """Отправка бинарного файла (документ, фото и т.п.)."""
     boundary = uuid.uuid4().hex
     body = io.BytesIO()
     body.write(("--%s\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n%s\r\n"
@@ -203,18 +206,23 @@ def send_bytes(chat_id, filename, data, caption="", mime="application/octet-stre
     if caption:
         body.write(("--%s\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n%s\r\n"
                     % (boundary, caption)).encode("utf-8"))
-    body.write(("--%s\r\nContent-Disposition: form-data; name=\"document\"; filename=\"%s\"\r\n"
-                "Content-Type: %s\r\n\r\n" % (boundary, filename, mime)).encode("utf-8"))
+    body.write(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+                "Content-Type: %s\r\n\r\n" % (boundary, field, filename, mime)).encode("utf-8"))
     body.write(data)
     body.write(("\r\n--%s--\r\n" % boundary).encode("utf-8"))
-    req = urllib.request.Request(API + "sendDocument", data=body.getvalue(), method="POST")
+    req = urllib.request.Request(API + method, data=body.getvalue(), method="POST")
     req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception as e:
-        print("sendDocument error:", e)
+        print(method, "error:", e)
         return {"ok": False, "description": "{}: {}".format(type(e).__name__, e)}
+
+
+def send_photo_bytes(chat_id, filename, data, caption=""):
+    return send_bytes(chat_id, filename, data, caption, mime="image/png",
+                      method="sendPhoto", field="photo")
 
 
 def download_file(file_id):
@@ -416,6 +424,10 @@ CREATE TABLE IF NOT EXISTS credits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT, balance REAL, rate REAL, min_pay REAL, fee REAL DEFAULT 0,
     pay_day INTEGER, closed INTEGER DEFAULT 0, created TEXT);
+CREATE TABLE IF NOT EXISTS debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person TEXT, amount REAL, taken_on TEXT, due_date TEXT,
+    returned INTEGER DEFAULT 0, returned_on TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER, text TEXT, file_id TEXT, file_kind TEXT, file_name TEXT,
@@ -500,12 +512,17 @@ def meta_set(k, v):
     run("INSERT INTO meta (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
 
 
-def get_state(chat_id):
+PENDING_TTL = 20 * 60  # забытый на 20+ минут ввод больше не мешает быстрым добавлениям
+
+
+def get_state(chat_id, fresh_only=False):
     row = q("SELECT * FROM state WHERE chat_id=?", (chat_id,), one=True)
     if not row:
         return {"student_id": None, "pending": None}
-    return {"student_id": row["student_id"],
-            "pending": json.loads(row["pending"]) if row["pending"] else None}
+    pending = json.loads(row["pending"]) if row["pending"] else None
+    if fresh_only and pending and time.time() - pending.get("_ts", 0) > PENDING_TTL:
+        pending = None
+    return {"student_id": row["student_id"], "pending": pending}
 
 
 def set_state(chat_id, student_id=..., pending=...):
@@ -513,6 +530,9 @@ def set_state(chat_id, student_id=..., pending=...):
     if student_id is not ...:
         st["student_id"] = student_id
     if pending is not ...:
+        if isinstance(pending, dict):
+            pending = dict(pending)
+            pending["_ts"] = time.time()
         st["pending"] = pending
     run("""INSERT INTO state (chat_id, student_id, pending) VALUES (?,?,?)
            ON CONFLICT(chat_id) DO UPDATE SET student_id=excluded.student_id,
@@ -532,6 +552,21 @@ def guests(chat_id):
              (chat_id,))
 
 
+def screen_guests():
+    gs = list(guests(owner_home()))
+    lines = ["🗂 <b>Гости без кода</b>", ""]
+    if not gs:
+        lines.append("Пока никто не заходил через «📚 Учить слова».")
+    rows = []
+    for g in gs:
+        n = word_count(g["id"])
+        rows.append([("{} — {} слов".format(g["name"], n), "st:%d" % g["id"])])
+        lines.append("• {} — слов: {}, повторов сегодня: {}".format(
+            esc(g["name"]), n, due_count(g["id"])))
+    rows.append([("⬅️ Назад", "menu")])
+    return "\n".join(lines), rows
+
+
 def owner_home():
     """Чат преподавателя — к нему привязываем гостей."""
     return int(meta_get("owner_chat", OWNER_ID or 0) or 0)
@@ -545,6 +580,12 @@ def make_guest(user_id, title=None):
     nick = gen_nick(home)
     sid = run("INSERT INTO students (chat_id, name, nick, is_guest, tg_user_id, access) "
               "VALUES (?,?,?,1,?,'kid')", (home, nick, nick, user_id))
+    total = q("SELECT COUNT(*) c FROM students WHERE chat_id=? AND COALESCE(is_guest,0)=1",
+             (home,), one=True)["c"]
+    if OWNER_ID:
+        send(OWNER_ID, "👋 Новый гость без кода: <b>{}</b> — учит слова сам.\n"
+                       "Гостей сейчас: {}.".format(esc(nick), total),
+             [[("👤 Открыть карточку", "st:%d" % sid)], [("🗂 Все гости", "guests_list")]])
     return student(sid)
 
 
@@ -981,7 +1022,7 @@ def screen_students(chat_id):
     rows.append([("📚 Мой словарь", "myw"), ("📕 Учебники", "books")])
     rows.append([("💰 Деньги", "money")])
     rows.append([("⏰ Напоминания", "notes"), ("💌 Визитка", "promo_me")])
-    rows.append([("📁 CSV", "export")])
+    rows.append([("📁 CSV", "export"), ("🗂 Гости", "guests_list")])
     text = ("👩‍🏫 <b>Ученики</b>\nРядом с именем — остаток оплаченных занятий.\n"
             "⚠️ оплата закончилась · 🔸 остался один урок")
     if not students(chat_id):
@@ -2715,9 +2756,12 @@ def screen_welcome(sid=None):
 
 
 def screen_share(sid):
+    s = sget(sid)
     rows = [[("📄 Выписка", "sh_st:%d" % sid)],
-            [("💳 Напоминание об оплате", "sh_pay:%d" % sid)],
-            [("🗓 Расписание", "sh_sch:%d" % sid)],
+            [("💳 Напоминание об оплате", "sh_pay:%d" % sid)]]
+    if s["tg_user_id"]:
+        rows[-1].append(("📨 Отправить ученику", "sh_paysend:%d" % sid))
+    rows += [[("🗓 Расписание", "sh_sch:%d" % sid)],
             [("🔗 Код: взрослый", "code:%d" % sid),
              ("🔗 Код: ребёнок", "codek:%d" % sid)],
             [("⬅️ Назад", "st:%d" % sid)]]
@@ -3581,9 +3625,14 @@ def screen_money():
                 money(max(paid - sum(c["balance"] or 0 for c in cs), 0))))
     else:
         lines += ["", "<i>Кредиты не заведены — добавьте, и появится прогноз.</i>"]
+    debt_sum = q("SELECT COALESCE(SUM(amount),0) s FROM debts WHERE returned=0",
+                one=True)["s"]
+    if debt_sum:
+        lines += ["", "🤝 Должна вернуть: <b>{}</b> (см. «Долги»)".format(money(debt_sum))]
     rows = [[("➖ Трата", "fin_new:e"), ("➕ Поступление", "fin_new:i")],
             [("🧾 Сегодня", "fin_day"), ("📊 За месяц", "fin_month")],
-            [("💳 Кредиты", "cr_list"), ("📁 Выгрузка", "fin_csv")],
+            [("💳 Кредиты", "cr_list"), ("🤝 Долги", "debts")],
+            [("📁 Выгрузка", "fin_csv")],
             [("⬅️ К ученикам", "menu")]]
     return "\n".join(lines), rows
 
@@ -3626,6 +3675,102 @@ def screen_fin_item(tid):
         cats.append(row)
     return text, cats + [[("🗑 Удалить запись", "fin_del:%d" % tid)],
                          [("⬅️ Назад", back)]]
+
+
+DEBT_RE = re.compile(r"(?i)\b(долг|займ|заня|одолж)")
+
+
+def looks_like_debt(text):
+    return bool(DEBT_RE.search(text)) and bool(re.search(r"\d", text)) and len(text) < 200
+
+
+def fin_expense(amount, title, d=None, category="Долги"):
+    if not amount:
+        return
+    run("INSERT INTO fin_tx (on_date, kind, amount, title, category, created) "
+        "VALUES (?,?,?,?,?,?)",
+        ((d or today()).isoformat(), "expense", float(amount), title[:60], category,
+         datetime.now().isoformat(timespec="seconds")))
+
+
+def parse_debt(text):
+    """«Марина 5000 вернуть 10.10» → (имя, сумма, дата или None)."""
+    t = text.strip()
+    due = None
+    m = re.search(r"(?i)(?:вернуть|верну|отдать|до|к)\s+(.+)$", t)
+    if m:
+        when = parse_when(m.group(1).strip())
+        if when:
+            due = when.date()
+            t = t[:m.start()].strip(" ,")
+    ma = re.search(r"(\d[\d \u00a0]*(?:[.,]\d{1,2})?)", t)
+    amount = None
+    if ma:
+        amount = float(ma.group(1).replace(" ", "").replace("\u00a0", "")
+                       .replace(",", "."))
+        t = (t[:ma.start()] + t[ma.end():]).strip()
+    t = re.sub(r"(?i)\b(взял[аи]?|заняла|одолжила|в\s*долг|долг[а-я]*|займ[а-я]*|у|"
+               r"руб|р\.?|₽)\b", " ", t)
+    person = re.sub(r"[\s,.:—-]+", " ", t).strip() or "без имени"
+    return person, amount, due
+
+
+def screen_debts():
+    rows_ = q("SELECT * FROM debts WHERE returned=0 "
+              "ORDER BY COALESCE(due_date, '9999-99-99'), id")
+    lines = ["🤝 <b>Долги — деньги, которые нужно вернуть</b>", ""]
+    if not rows_:
+        lines.append("Пока пусто.")
+    total = 0
+    for r_ in rows_:
+        total += r_["amount"] or 0
+        overdue = r_["due_date"] and r_["due_date"] < today().isoformat()
+        when = (" · вернуть {}".format(fmt_date(r_["due_date"], True))
+                if r_["due_date"] else " · срок не задан")
+        lines.append("{} {} — {}{}".format(
+            "⚠️" if overdue else "•", money(r_["amount"]), esc(r_["person"]), when))
+    if rows_:
+        lines += ["", "Всего должна: <b>{}</b>".format(money(total))]
+    rows = [[("{} — {}{}".format(esc(r_["person"])[:16], money(r_["amount"]),
+                                 " · " + fmt_date(r_["due_date"], True) if r_["due_date"]
+                                 else ""), "debt_item:%d" % r_["id"])] for r_ in rows_]
+    rows += [[("➕ Взять в долг", "debt_add")], [("⬅️ Назад", "money")]]
+    return "\n".join(lines), rows
+
+
+def screen_debt_item(did):
+    r_ = q("SELECT * FROM debts WHERE id=?", (did,), one=True)
+    if not r_:
+        return "Не нашла такой долг.", [[("⬅️ Назад", "debts")]]
+    text = ("🤝 <b>{}</b>\nСумма: {}\nВзято: {}\nВернуть: {}".format(
+        esc(r_["person"]), money(r_["amount"]), fmt_date(r_["taken_on"]),
+        fmt_date(r_["due_date"]) if r_["due_date"] else "срок не задан"))
+    return text, [[("✅ Вернула", "debt_ret:%d" % did)],
+                 [("📅 Задать срок" if not r_["due_date"] else "📅 Изменить срок",
+                   "debt_due:%d" % did)],
+                 [("🗑 Удалить запись", "debt_del:%d" % did)],
+                 [("⬅️ Назад", "debts")]]
+
+
+def debt_reminders():
+    """Раз в день — что пора возвращать (просрочено или до дедлайна ≤ 2 дней)."""
+    if not OWNER_ID:
+        return
+    if meta_get("debtrem_date") == today().isoformat():
+        return
+    meta_set("debtrem_date", today().isoformat())
+    soon = q("SELECT * FROM debts WHERE returned=0 AND due_date IS NOT NULL AND due_date<=?",
+             ((today() + timedelta(days=2)).isoformat(),))
+    if not soon:
+        return
+    lines = ["🤝 <b>Пора вернуть</b>", ""]
+    for r_ in soon:
+        overdue = r_["due_date"] < today().isoformat()
+        lines.append("{} {} — {}{}".format(
+            "⚠️ просрочено," if overdue else "•", money(r_["amount"]), esc(r_["person"]),
+            " было до {}".format(fmt_date(r_["due_date"], True)) if overdue
+            else " до {}".format(fmt_date(r_["due_date"], True))))
+    send(OWNER_ID, "\n".join(lines), [[("🤝 Открыть долги", "debts")]])
 
 
 def screen_credits():
@@ -4108,6 +4253,66 @@ def spark(vals, width=8):
                    for v in vals)
 
 
+def png_encode(width, height, get_pixel):
+    """Простой PNG-кодировщик без сторонних библиотек. get_pixel(x, y) -> (r, g, b)."""
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        for x in range(width):
+            raw += bytes(get_pixel(x, y))
+    idat = zlib.compress(bytes(raw), 9)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat)
+            + chunk(b"IEND", b""))
+
+
+def heat_color(ratio):
+    """0 → белый, 1 → насыщенный синий (палитра как у Anki)."""
+    ratio = max(0.0, min(1.0, ratio))
+    stops = [(255, 255, 255), (198, 219, 239), (107, 174, 214), (33, 113, 181),
+             (8, 48, 107)]
+    pos = ratio * (len(stops) - 1)
+    i = min(int(pos), len(stops) - 2)
+    frac = pos - i
+    a, b = stops[i], stops[i + 1]
+    return tuple(round(a[k] + (b[k] - a[k]) * frac) for k in range(3))
+
+
+def deck_heatmap_png(sid, weeks=53):
+    """Картинка-теплокарта повторений по дням, как календарь в Anki."""
+    cell, gap, margin = 11, 3, 6
+    days = weeks * 7
+    start = today() - timedelta(days=days - 1)
+    start -= timedelta(days=start.weekday())  # выравниваем по понедельнику
+    total_days = (today() - start).days + 1
+    cols = (total_days + 6) // 7
+    rows_ = q("SELECT on_date, COUNT(*) c FROM reviews WHERE student_id=? AND on_date>=?"
+              " GROUP BY on_date", (sid, start.isoformat()))
+    by = {r["on_date"]: r["c"] for r in rows_}
+    top = max(by.values()) if by else 1
+    width = margin * 2 + cols * (cell + gap) - gap
+    height = margin * 2 + 7 * (cell + gap) - gap
+    bg = (30, 30, 30)
+
+    def pixel(x, y):
+        cx, cy = x - margin, y - margin
+        if cx < 0 or cy < 0:
+            return bg
+        col, row = cx // (cell + gap), cy // (cell + gap)
+        if cx % (cell + gap) >= cell or cy % (cell + gap) >= cell:
+            return bg
+        d = start + timedelta(days=col * 7 + row)
+        if d > today():
+            return bg
+        c = by.get(d.isoformat(), 0)
+        return heat_color(c / top) if c else (58, 58, 58)
+
+    return png_encode(width, height, pixel)
+
+
 def calendar_heat(counts, per_row=7):
     if not counts:
         return ""
@@ -4171,7 +4376,8 @@ def screen_deck_stats(sid):
         lines += ["", "<b>Труднее всего</b>"]
         for h in hard:
             lines.append("• {} — {} ({}×)".format(esc(h["term"]), esc(h["tr"] or ""), h["c"]))
-    return "\n".join(lines), [[("🔁 Повторить ({})".format(due_count(sid)), "lrn_go:%d" % sid)],
+    return "\n".join(lines), [[("🖼 Календарь картинкой", "lrn_heat:%d" % sid)],
+                              [("🔁 Повторить ({})".format(due_count(sid)), "lrn_go:%d" % sid)],
                               [("⬅️ Назад", "lrn_words:%d" % sid)]]
 
 
@@ -4296,13 +4502,24 @@ def record_lesson(chat_id, sid, d, kind="held", charged=1, reason=None):
         what += " ({})".format(reason)
     flash(chat_id, "✅ {} — <b>{}</b>, {}.\nОстаток: <b>{}</b> {}.".format(
         what, esc(s["name"]), fmt_date(d), st["left"], plural(st["left"])))
-    if st["left"] == 1:
-        send(chat_id, "🔔 У <b>{}</b> остался последний оплаченный урок — пора напомнить "
-                      "об оплате. Готовое сообщение ниже 👇".format(esc(s["name"])))
-        send(chat_id, text_reminder(sid))
-    elif st["left"] <= 0:
-        send(chat_id, "🔔 У <b>{}</b> оплаченные занятия закончились. "
-                      "Готовое сообщение ниже 👇".format(esc(s["name"])))
+    adult = (s["access"] or "full") != "kid" and not s["is_guest"] and not s["is_self"]
+    if st["left"] in (1, 0) or st["left"] < 0:
+        if adult and s["tg_user_id"]:
+            notify_student(sid, text_reminder(sid))
+            sent_note = "✅ Отправила это ей/ему автоматически."
+        elif adult:
+            sent_note = "Ученик не подключён — отправьте вручную, текст ниже 👇."
+        else:
+            sent_note = "Готовое сообщение ниже 👇 — перешлите вручную."
+        if st["left"] == 1:
+            head = "🔔 У <b>{}</b> остался последний оплаченный урок.".format(esc(s["name"]))
+        elif st["left"] == 0:
+            head = "🔔 У <b>{}</b> оплаченные занятия закончились.".format(esc(s["name"]))
+        else:
+            head = "🔔 У <b>{}</b> занятий больше, чем оплачено.".format(esc(s["name"]))
+        send(chat_id, "{} {}".format(head, sent_note),
+             None if (adult and s["tg_user_id"]) else
+             [[("📨 Отправить ученику", "sh_paysend:%d" % sid)]] if s["tg_user_id"] else None)
         send(chat_id, text_reminder(sid))
     return lid
 
@@ -4315,6 +4532,11 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     sid = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
 
     # экраны словаря доступны и ученику, и педагогу
+    if cmd == "guests_list":
+        toast(cq_id)
+        t, r = screen_guests()
+        return edit(chat_id, message_id, t, r)
+
     if cmd == "guest_go":
         toast(cq_id)
         g = make_guest(user_id)
@@ -4341,6 +4563,7 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                "lrn_pet", "lrn_petname", "lrn_ex", "lrn_exgo", "lrn_exa", "lrn_exn",
                "lrn_exask", "lrn_exdrop",
                "lrn_words", "lrn_more", "w_del", "w_delok", "lrn_quiet", "lrn_stats",
+               "lrn_heat",
                "fbr", "fbskip", "w_show", "w_g"):
         learner = student_by_user(user_id)
         if not is_owner(user_id):
@@ -4376,6 +4599,16 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
                   else "Напоминания включены")
             t, r = screen_more_menu(sid)
             return edit(chat_id, message_id, t, r)
+
+        if cmd == "lrn_heat":
+            toast(cq_id, "Рисую…")
+            png = deck_heatmap_png(sid)
+            res = send_photo_bytes(chat_id, "heatmap.png", png,
+                                   "🖼 Повторения за год — {}".format(sget(sid)["name"]))
+            if not (res or {}).get("ok"):
+                send(chat_id, "⚠️ Не вышло отправить картинку: <code>{}</code>".format(
+                    esc(str((res or {}).get("description"))[:150])))
+            return
 
         if cmd == "lrn_stats":
             toast(cq_id)
@@ -4666,7 +4899,8 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
         t, r = fn(*a)
         edit(chat_id, message_id, t, r)
 
-    if cmd.startswith(("fin_", "cr_", "money", "nt_", "notes", "bks_", "bka", "books")):
+    if cmd.startswith(("fin_", "cr_", "money", "nt_", "notes", "bks_", "bka", "books",
+                       "debt", "guests")):
         sid = None
     if sid is not None and not student(sid):
         t, r = screen_students(chat_id)
@@ -4904,6 +5138,43 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
 
     if cmd == "money":
         t, r = screen_money()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "debts":
+        t, r = screen_debts()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "debt_add":
+        set_state(chat_id, pending={"action": "debt_add"})
+        return edit(chat_id, message_id,
+                    "🤝 Кто дал в долг и сколько? Можно сразу со сроком:\n\n"
+                    "<code>Марина, 5000</code>\n<code>Марина, 5000, вернуть 10.10</code>",
+                    [[("⬅️ Назад", "debts")]])
+
+    if cmd == "debt_item":
+        t, r = screen_debt_item(int(parts[1]))
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "debt_due":
+        set_state(chat_id, pending={"action": "debt_due", "did": int(parts[1])})
+        return edit(chat_id, message_id,
+                    "📅 Когда нужно вернуть? Например «10.10», «через 2 недели», "
+                    "«пятница».", [[("⬅️ Назад", "debt_item:%s" % parts[1])]])
+
+    if cmd == "debt_ret":
+        r_ = q("SELECT * FROM debts WHERE id=?", (int(parts[1]),), one=True)
+        if r_:
+            run("UPDATE debts SET returned=1, returned_on=? WHERE id=?",
+                (today().isoformat(), r_["id"]))
+            fin_expense(r_["amount"], "Возврат долга: " + r_["person"])
+            toast(cq_id, "Записала возврат")
+        t, r = screen_debts()
+        return edit(chat_id, message_id, t, r)
+
+    if cmd == "debt_del":
+        run("DELETE FROM debts WHERE id=?", (int(parts[1]),))
+        toast(cq_id, "Удалено")
+        t, r = screen_debts()
         return edit(chat_id, message_id, t, r)
 
     if cmd == "cr_list":
@@ -5726,6 +5997,15 @@ def handle_callback(chat_id, message_id, cq_id, payload, user_id):
     if cmd == "share":
         return show(screen_share, sid)
 
+    if cmd == "sh_paysend":
+        s_ = sget(sid)
+        if not s_["tg_user_id"]:
+            return toast(cq_id, "Ученик не подключён")
+        notify_student(sid, text_reminder(sid))
+        toast(cq_id, "Отправила")
+        return edit(chat_id, message_id,
+                    "✅ Напоминание об оплате отправлено ученику.", [[("⬅️ Назад", "share:%d" % sid)]])
+
     if cmd in ("sh_st", "sh_pay", "sh_sch", "code", "codek"):
         if cmd == "code":
             text = text_invite(sid, "full")
@@ -5979,6 +6259,39 @@ def handle_pending(chat_id, pending, text, user_id=None, entities=None):
         body += [""] + fin_day_lines(added)
         send(chat_id, "\n".join(body))
         t, r = screen_money()
+        return send(chat_id, t, r)
+
+    if action == "debt_add":
+        person, amount, due = parse_debt(text)
+        if not amount:
+            return send(chat_id, "Не поняла сумму. Например: "
+                                 "<code>Марина, 5000, вернуть 10.10</code>")
+        set_state(chat_id, pending=None)
+        did = run("INSERT INTO debts (person, amount, taken_on, due_date, returned, "
+                  "created) VALUES (?,?,?,?,0,?)",
+                  (person, amount, today().isoformat(),
+                   due.isoformat() if due else None, today().isoformat()))
+        fin_income(amount, "Долг: " + person, category="Долги")
+        if due:
+            flash(chat_id, "✅ Записала долг: {} — {}, вернуть {}.".format(
+                esc(person), money(amount), fmt_date(due)))
+            t, r = screen_debts()
+            return send(chat_id, t, r)
+        set_state(chat_id, pending={"action": "debt_due", "did": did})
+        return send(chat_id, "✅ Записала долг: {} — {}.\n\nКогда нужно вернуть? "
+                             "Например «10.10», «через 2 недели», «пятница».".format(
+                                 esc(person), money(amount)))
+
+    if action == "debt_due":
+        when = parse_when(text)
+        if not when:
+            return send(chat_id, "Не поняла дату. Например: «10.10», «через 2 недели», "
+                                 "«пятница».")
+        run("UPDATE debts SET due_date=? WHERE id=?",
+            (when.date().isoformat(), pending["did"]))
+        set_state(chat_id, pending=None)
+        flash(chat_id, "✅ Срок возврата: {}.".format(fmt_date(when.date())))
+        t, r = screen_debts()
         return send(chat_id, t, r)
 
     if action == "credit":
@@ -6515,6 +6828,10 @@ def handle_command(chat_id, user_id, text):
         t, r = screen_month(chat_id)
         return send(chat_id, t, r)
 
+    if cmd in ("guests", "гости"):
+        t, r = screen_guests()
+        return send(chat_id, t, r)
+
     if cmd in ("books", "учебники"):
         if arg.strip() in ("экран", "меню", ""):
             t, r = screen_books()
@@ -6544,6 +6861,10 @@ def handle_command(chat_id, user_id, text):
                     fmt_when(when.isoformat(timespec="minutes"))),
                     [[("⏰ Все напоминания", "notes")]])
         t, r = screen_notes(chat_id)
+        return send(chat_id, t, r)
+
+    if cmd in ("debts", "долги"):
+        t, r = screen_debts()
         return send(chat_id, t, r)
 
     if cmd in ("money", "деньги", "траты"):
@@ -7444,7 +7765,10 @@ def handle(update):
             return learner_flow(chat_id, user_id, text)
         if text.startswith("/"):
             return handle_command(chat_id, user_id, text)
-        pending = get_state(chat_id)["pending"]
+        raw_state = get_state(chat_id)
+        pending = get_state(chat_id, fresh_only=True)["pending"]
+        if raw_state["pending"] and not pending:
+            set_state(chat_id, pending=None)  # молча убираем протухший, забытый ввод
         if pending:
             return handle_pending(chat_id, pending, text, user_id, msg.get("entities"))
         if is_owner(user_id) and re.match(r"^\s*(напомни|напомнить|заметка)\b", text,
@@ -7458,6 +7782,8 @@ def handle(update):
                     [[("⏰ Все напоминания", "notes")]])
             return send(chat_id, "Не поняла, когда напомнить. Например: "
                                  "<code>напомни завтра в 10 позвонить в клинику</code>")
+        if is_owner(user_id) and looks_like_debt(text):
+            return handle_pending(chat_id, {"action": "debt_add"}, text, user_id)
         if is_owner(user_id) and looks_like_money(text):
             added = fin_add([l for l in text.splitlines() if l.strip()])
             if added:
@@ -7561,7 +7887,7 @@ def main():
                 report_error(u)
         for job in (daily_digest, hourly_jobs, monthly_feedback, award_keys,
                     pet_jobs, streak_keys, weekly_board, weekly_report, fin_ask,
-                    notes_job, auto_backup):
+                    debt_reminders, notes_job, auto_backup):
             try:
                 job()
             except Exception:
